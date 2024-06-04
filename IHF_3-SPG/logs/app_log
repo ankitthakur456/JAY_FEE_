@@ -1,0 +1,6 @@
+'JayFee_log - INFO - Line: 107 - test_spg.py - [+] Initialising configuration'
+'JayFee_log - INFO - Line: 109 - test_spg.py - [+] Machine is SPG-1'
+'JayFee_log - INFO - Line: 110 - test_spg.py - [+] Machine stage is IHF_BSPN'
+'JayFee_log - INFO - Line: 111 - test_spg.py - [+] Machine IP is 192.168.0.1'
+'JayFee_log - INFO - Line: 112 - test_spg.py - [+] Trigger topic is True'
+'JayFee_log - INFO - Line: 162 - test_spg.py -  [*] Waiting for messages.'

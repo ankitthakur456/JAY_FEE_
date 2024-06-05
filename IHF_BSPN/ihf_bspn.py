@@ -5,7 +5,7 @@ import requests
 from database import DBHelper
 import time
 import asyncio
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 import json
 import os
@@ -15,10 +15,11 @@ from datetime import datetime
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
+
 # Load the .env file
 load_dotenv()
 
-#logs dir
+# logs dir
 if not os.path.isdir("./logs"):
     print("[-] logs directory doesn't exists")
     os.mkdir("./logs")
@@ -26,20 +27,20 @@ if not os.path.isdir("./logs"):
 dirname = os.path.dirname(os.path.abspath(__file__))
 logging.config.fileConfig('logging.config')
 logger = logging.getLogger('JayFee_log')
-#end region
+# end region
 
 GL_MACHINE_INFO = {
     'SPG-1': {
         'py_ok': True,
-        'ip': '192.168.0.1',
+        'ip': '192.168.0.144',
         'stage': 'IHF_BSPN',
-        'line': 'Line 2',
+        'line': 'Line 1',
     },
     'SPG-2': {
         'py_ok': True,
         'ip': '"192.168.0.107"',
         'stage': 'IHF_NSPN',
-        'line': 'Line 2',
+        'line': 'Line 1',
     }
 }
 
@@ -59,14 +60,16 @@ HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
 FL_STATUS = False
-ihf_heating_list = []
-spg_heating_list = []
-oxygen_heating_list = []
-png_pressure_list = []
-air_pressure_list = []
-DAAcetylenePressure_list = []
+gl_IHF_HEATING_LIST = []
+gl_SPG_HEATING_LIST = []
+gl_OXYGEN_HEATING_LIST = []
+gl_PNG_PRESSURE_LIST = []
+gl_AIR_PRESSURE_LIST = []
+gl_DAACETYLENE_PRESSURE_LIST = []
 ob_db = DBHelper()
-#DATA GATHERING
+
+
+# DATA GATHERING
 
 def init_conf():
     global GL_MACHINE_NAME, GL_PARAM_LIST, PUBLISH_TOPIC, PY_OK, ENERGY_TOPIC, GL_IP
@@ -113,7 +116,6 @@ def Connection():
     return c
 
 
-
 def Reading_data():
     try:
         c = Connection()
@@ -138,7 +140,7 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name, SERIAL_NUMBER_CONTAINER, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+async def receive_message(queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
     credentials = pika.PlainCredentials(username, password)
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port, credentials=credentials))
     channel = connection.channel()
@@ -146,11 +148,9 @@ async def receive_message(queue_name, SERIAL_NUMBER_CONTAINER, host=HOST, port=P
 
     def callback(ch, method, properties, body):
         logger.info(f" [x] Received {body} ")
-        SERIAL_NUMBER_CONTAINER.put(body)
+        ob_db.enqueue_serial_number(body.decode('utf-8'))
         # Send acknowledgment
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        # Stop consuming after receiving one message
-        #ch.stop_consuming()
         return body
 
     channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
@@ -159,8 +159,8 @@ async def receive_message(queue_name, SERIAL_NUMBER_CONTAINER, host=HOST, port=P
     channel.start_consuming()
 
 
-def thread_target(queue_name, SERIAL_NUMBER_CONTAINER):
-    asyncio.run(receive_message(queue_name, SERIAL_NUMBER_CONTAINER))
+def thread_target(queue_name):
+    asyncio.run(receive_message(queue_name))
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -203,20 +203,10 @@ def post_data(DATA):
             ob_db.add_sync_data(DATA)
 
 
-def main(SERIAL_NUMBER_CONTAINER):
-    global FL_STATUS, PREV_FL_STATUS
+def main():
+    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST
     while True:
-        serial_ = None
         ob_db = DBHelper()
-        #logger.info(f'SERIAL_NUMBER_CONTAINER is {SERIAL_NUMBER_CONTAINER}')
-        if not SERIAL_NUMBER_CONTAINER.empty():
-            serial_ = SERIAL_NUMBER_CONTAINER.get(serial_)
-            ob_db.enqueue_serial_number(serial_.decode('utf-8'))
-            logger.info(f'serial number is {serial_}')
-            if serial_:
-                logger.info(f'serial number is {serial_}')
-                body = f'serial number is {serial_}'
-                asyncio.run(send_message(body, SEND_ACK_ADDING))
         try:
             data = Reading_data()
             ihf_heating = float_conversion([data[0], data[1]])
@@ -238,53 +228,75 @@ def main(SERIAL_NUMBER_CONTAINER):
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
             if FL_STATUS:
-                ihf_heating_list.append(ihf_heating)
-                spg_heating_list.append(spg_heating)
-                oxygen_heating_list.append(oxygen_heating)
-                png_pressure_list.append(png_pressure)
-                air_pressure_list.append(air_pressure)
-                DAAcetylenePressure_list.append(DA_pressure)
+                gl_IHF_HEATING_LIST.append(ihf_heating)
+                gl_SPG_HEATING_LIST.append(spg_heating)
+                gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
+                gl_PNG_PRESSURE_LIST.append(png_pressure)
+                gl_AIR_PRESSURE_LIST.append(air_pressure)
+                gl_DAACETYLENE_PRESSURE_LIST.append(DA_pressure)
 
             if FL_STATUS != PREV_FL_STATUS:
-                logger.info(f'ihf_heating_list list is {ihf_heating_list}')
-                logger.info(f'spg_heating_list list is {spg_heating_list}')
-                logger.info(f'oxygen_heating_list list is {oxygen_heating_list}')
-                logger.info(f'png_pressure_list list is {png_pressure_list}')
-                logger.info(f'air_pressure_list list is {air_pressure_list}')
-                logger.info(f'air_pressure_list list is {DAAcetylenePressure_list}')
-                ihf_temperature = max(ihf_heating_list)
-                ihf_entering = max(spg_heating_list)
-                spindle_speed = max(air_pressure_list)
-                spindle_feed = max(DAAcetylenePressure_list)
-                o2_gas_pressure = max(oxygen_heating_list)
-                png_pressure = max(png_pressure_list)
+                logger.info(f'gl_IHF_HEATING_LIST list is {gl_IHF_HEATING_LIST}')
+                logger.info(f'gl_SPG_HEATING_LIST list is {gl_SPG_HEATING_LIST}')
+                logger.info(f'gl_OXYGEN_HEATING_LIST list is {gl_OXYGEN_HEATING_LIST}')
+                logger.info(f'gl_PNG_PRESSURE_LIST     list is {gl_PNG_PRESSURE_LIST}')
+                logger.info(f'gl_AIR_PRESSURE_LIST list is {gl_AIR_PRESSURE_LIST}')
+                logger.info(f'gl_AIR_PRESSURE_LIST list is {gl_DAACETYLENE_PRESSURE_LIST}')
+                ihf_temperature = max(gl_IHF_HEATING_LIST)
+                ihf_entering = max(gl_SPG_HEATING_LIST)
+                air_pressure = max(gl_AIR_PRESSURE_LIST)
+                spindle_speed = 150
+                spindle_feed = 300
+                da_pressure = max(gl_DAACETYLENE_PRESSURE_LIST)
+                o2_gas_pressure = max(gl_OXYGEN_HEATING_LIST)
+                png_pressure = max(gl_PNG_PRESSURE_LIST)
+
+                # "ihf_temperature": 1000,
+                # "ihf_entering": 900,
+                # "spindle_speed": 150,
+                # "spindle_feed": 300,
+                # "da_gas_pressure": 4,
+                # "o2_gas_pressure": 6,
+                # "air_pressure": 6,
+                # "png_pressure": 0.8
+
                 serial_number = ob_db.get_first_serial_number()
+                asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
+                logging.info(f'serial number is {serial_number}')
                 shift = get_shift()
                 if serial_number:
                     time_ = datetime.now().isoformat()
                     date = datetime.now().strftime("%Y-%m-%d")
                     DATA = {
                         "serial_number": serial_number,
-                            "time_": time_,
-                            "date_": date,
-                            "line": LINE,
-                            "machine": GL_MACHINE_NAME,
-                            "shift": shift,
-                            "py_ok": True,
-                            "ihf_temperature": 1000,
-                            "ihf_entering": 900,
-                            "spindle_speed": 150,
-                            "spindle_feed": 300,
-                            "o2_gas_pressure": 4,
-                            "png_pressure": 0.8
-                                    }
-                    ob_db.save_running_data(serial_number, 0.5, 0.4, 3.2, 1.2,
-                                            2.2, 4)
+                        "time_": time_,
+                        "date_": date,
+                        "line": LINE,
+                        "machine": GL_MACHINE_NAME,
+                        "shift": shift,
+                        "py_ok": PY_OK,
+                        "ihf_temperature": ihf_temperature,
+                        "ihf_entering": ihf_entering,
+                        "spindle_speed": spindle_speed,
+                        "spindle_feed": spindle_feed,
+                        "da_gas_pressure": da_pressure,
+                        "o2_gas_pressure": o2_gas_pressure,
+                        "air_pressure": air_pressure,
+                        "png_pressure": png_pressure
+                    }
+
+                    ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure, png_pressure,
+                                            air_pressure, da_pressure, spindle_speed, spindle_feed)
                     if FL_STATUS:
                         logger.info(f'cycle running')
                     if not FL_STATUS:
                         post_data(DATA)
-                time.sleep(10)
+                        gl_IHF_HEATING_LIST = []
+                        gl_SPG_HEATING_LIST = []
+                        gl_OXYGEN_HEATING_LIST = []
+                        gl_PNG_PRESSURE_LIST = []
+                        gl_AIR_PRESSURE_LIST = []
+                        gl_DAACETYLENE_PRESSURE_LIST = []
             PREV_FL_STATUS = FL_STATUS
         except Exception as err:
             logger.error(f'error in executing main {err}')
@@ -292,14 +304,21 @@ def main(SERIAL_NUMBER_CONTAINER):
 
 if __name__ == '__main__':
     try:
-        SERIAL_NUMBER_CONTAINER = Queue()
-        while True:
-            t1 = threading.Thread(target=thread_target, args=(ADD_SERIAL_NUMBER, SERIAL_NUMBER_CONTAINER))
-            t2 = threading.Thread(target=main, args=(SERIAL_NUMBER_CONTAINER,))
-            t1.start()
-            t2.start()
-            t1.join()
-            t2.join()
-            time.sleep(3)
+        Serial_Number_Container = Queue()
+        with ThreadPoolExecutor() as executor:
+            while True:
+                future = executor.submit(thread_target, ADD_SERIAL_NUMBER)
+                future1 = executor.submit(main)
+                if future.done():
+                    logger.info("thread_target task completed")
+                else:
+                    logger.error("thread_target task still running")
+
+                if future1.done():
+                    logger.info("main task completed")
+                else:
+                    logger.error("main task still running")
+                    # Sleep for a specified time before the next iteration
+                time.sleep(1)
     except KeyboardInterrupt:
-        logger.info('Interrupted')
+        logger.error('Interrupted')

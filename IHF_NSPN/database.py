@@ -70,7 +70,7 @@ class DBHelper:
     # region running data functions
 
     def save_running_data(self, serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                          PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure):
+                          PNG_PRESSURE):
         try:
             self.cursor.execute("""SELECT * FROM running_data WHERE serial_number = ?""",
                                 (serial_number,))
@@ -78,16 +78,15 @@ class DBHelper:
             if data:
                 self.cursor.execute("""UPDATE running_data SET
                 timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
-                png_pressure = ?, air_pressure = ?, DAAcetylenePressure = ?
+                png_pressure = ?
                 WHERE serial_number = ?""",
-                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE,
-                                     AIR_PRESSURE, DAAcetylenePressure, serial_number))
+                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE, serial_number))
             else:
                 self.cursor.execute("""INSERT INTO running_data(timestamp, serial_number,
-                ihf_heating, spg_heating, oxygen_heating, png_pressure, air_pressure, DAAcetylenePressure)
-                VALUES(?,?,?,?,?,?,?,?)""",
+                ihf_heating, spg_heating, oxygen_heating, png_pressure)
+                VALUES(?,?,?,?,?,?)""",
                                     (time.time(), serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                                     PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure))
+                                     PNG_PRESSURE ))
             self.connection.commit()
             logger.info(f"[+] Successful, Running Data Saved to the database")
         except Exception as error:

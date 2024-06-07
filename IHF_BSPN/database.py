@@ -20,15 +20,19 @@ class DBHelper:
                                     shift VARCHAR(2),
                                     payload STRING)
                                 """)
-        self.cursor.execute("""CREATE TABLE IF NOT EXISTS running_data(
-                            timestamp INTEGER,
-                            IHF_HEATING REAL,
-                            SPG_HEATING REAL,
-                            OXYGEN_HEATING REAL,
-                            PNG_PRESSURE REAL,
-                            AIR_PRESSURE REAL,
-                            DAAcetylenePressure REAL,
-                            serial_number TEXT)""")
+        self.cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS running_data(
+                        timestamp INTEGER,
+                        ihf_heating REAL,
+                        spg_heating REAL,
+                        oxygen_heating REAL,
+                        png_pressure REAL,
+                        air_pressure REAL,
+                        daacetylene_pressure REAL,
+                        spindle_speed REAL,
+                        spindle_feed REAL,
+                        serial_number TEXT PRIMARY KEY
+                    )""")
 
 
     # region queue functions
@@ -69,27 +73,31 @@ class DBHelper:
 
     # region running data functions
 
-    def save_running_data(self, serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                          PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure):
+    def save_running_data(self, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                          png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed):
         try:
-            self.cursor.execute("""SELECT * FROM running_data WHERE serial_number = ?""",
-                                (serial_number,))
+            self.cursor.execute("SELECT * FROM running_data WHERE serial_number = ?", (serial_number,))
             data = self.cursor.fetchone()
+            timestamp = int(time.time())
+
             if data:
-                self.cursor.execute("""UPDATE running_data SET
-                timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
-                png_pressure = ?, air_pressure = ?, DAAcetylenePressure = ?
-                WHERE serial_number = ?""",
-                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE,
-                                     AIR_PRESSURE, DAAcetylenePressure, serial_number))
+                self.cursor.execute("""
+                    UPDATE running_data SET
+                        timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
+                        png_pressure = ?, air_pressure = ?, daacetylene_pressure = ?, spindle_speed = ?, spindle_feed = ?
+                    WHERE serial_number = ?""",
+                                    (timestamp, ihf_heating, spg_heating, oxygen_heating, png_pressure,
+                                     air_pressure, daacetylene_pressure, spindle_speed, spindle_feed, serial_number))
             else:
-                self.cursor.execute("""INSERT INTO running_data(timestamp, serial_number,
-                ihf_heating, spg_heating, oxygen_heating, png_pressure, air_pressure, DAAcetylenePressure)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                                    (time.time(), serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                                     PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure))
+                self.cursor.execute("""
+                    INSERT INTO running_data(timestamp, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                                             png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    (timestamp, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                                     png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed))
+
             self.connection.commit()
-            logger.info(f"[+] Successful, Running Data Saved to the database")
+            logger.info("[+] Successful, Running Data Saved to the database")
         except Exception as error:
             logger.error(f"[-] Failed to save running data. Error: {error}")
 

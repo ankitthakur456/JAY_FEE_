@@ -55,7 +55,7 @@ SEND_ACK_ADDING = os.getenv('SEND_ACK_ADDING')
 SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
 SEND_DATA_QUEUE = os.getenv('SEND_DATA_QUEUE')
 SEND_DATA = True
-API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_ihf_data/"
+API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_neck_spinning_data/"
 HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
@@ -64,11 +64,13 @@ gl_IHF_HEATING_LIST = []
 gl_SPG_HEATING_LIST = []
 gl_OXYGEN_HEATING_LIST = []
 gl_PNG_PRESSURE_LIST = []
+gl_DA_GAS_PRESSURE_LIST = []
 ob_db = DBHelper()
-ihf_temperature=0
-ihf_entering=0
-o2_gas_pressure=0
-png_pressure=0
+ihf_temperature = 0
+ihf_entering = 0
+o2_gas_pressure = 0
+png_pressure = 0
+
 
 # DATA GATHERING
 
@@ -124,7 +126,7 @@ def Reading_data():
         logger.info(f"values from register is {regs}")
         c.close()
         if not regs:
-            a=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            a = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
             return a
         else:
             return regs
@@ -139,7 +141,6 @@ def reading_status():
         return regs
     except Exception as err:
         logger.error(f'Error is in Reading Data from PLC {err}')
-
 
 
 def float_conversion(registers):
@@ -197,35 +198,37 @@ def post_data(DATA):
             print(DATA)
             print(send_req.status_code)
             send_req.raise_for_status()
-            data = ob_db.get_sync_data()
-
-            if data:
-                try:
-                    for value in data:
-                        payload = json.loads(value[0])
-                        print(f"Payload to send sync {payload}")
-                        sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                        sync_req.raise_for_status()
-                        print(f"payload send from sync data : {sync_req.status_code}")
-
-                except Exception as e:
-                    print(f"[-] Error in sending SYNC data {e}")
-                else:
-                    ob_db.delete_sync_data()
-            else:
-                print(f"Synced data is empty")
-
         except Exception as e:
             print(f"[-] Error in sending data TO API, {e}")
             ob_db.add_sync_data(DATA)
 
 
+def post_sync_data():
+    data = ob_db.get_sync_data()
+    if data:
+        try:
+            for value in data:
+                payload = json.loads(value[0])
+                print(f"Payload to send sync {payload}")
+                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+                sync_req.raise_for_status()
+                print(f"payload send from sync data : {sync_req.status_code}")
+
+        except Exception as e:
+            print(f"[-] Error in sending SYNC data {e}")
+        else:
+            ob_db.delete_sync_data()
+    else:
+        print(f"Synced data is empty")
+
+
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST
+    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DA_GAS_PRESSURE_LIST
     global ihf_temperature, ihf_entering, o2_gas_pressure, png_pressure
     while True:
         ob_db = DBHelper()
         try:
+            post_sync_data()
             data = Reading_data()
             status = reading_status()
             logger.info(f'status from machine is {status}')
@@ -237,6 +240,8 @@ def main():
             logger.info(f'oxygen_heating_ is {oxygen_heating}')
             png_pressure = round(float_conversion([data[6], data[7]]), 2)
             logger.info(f'png_pressure_ is {png_pressure}')
+            da_gas_pressure = round(float_conversion([data[8], data[9]]), 2)
+            logger.info(f'da_gas_pressure is {da_gas_pressure}')
             if status[1] >= 10:
                 FL_STATUS = True
                 logger.info(f'cycle running')
@@ -248,6 +253,7 @@ def main():
                 gl_SPG_HEATING_LIST.append(spg_heating)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
+                gl_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
 
             if FL_STATUS != PREV_FL_STATUS:
                 try:
@@ -263,12 +269,14 @@ def main():
                             logger.info(f'gl_SPG_HEATING_LIST list is {gl_SPG_HEATING_LIST}')
                             logger.info(f'gl_OXYGEN_HEATING_LIST list is {gl_OXYGEN_HEATING_LIST}')
                             logger.info(f'gl_PNG_PRESSURE_LIST     list is {gl_PNG_PRESSURE_LIST}')
+                            logger.info(f'gl_DA_GAS_PRESSURE_LIST list is {gl_DA_GAS_PRESSURE_LIST}')
                             ihf_temperature = max(gl_IHF_HEATING_LIST)
                             ihf_entering = max(gl_SPG_HEATING_LIST)
                             spindle_speed = 150
                             spindle_feed = 300
                             o2_gas_pressure = max(gl_OXYGEN_HEATING_LIST)
                             png_pressure = max(gl_PNG_PRESSURE_LIST)
+                            da_gas_pressure = max(gl_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()
                                 date = datetime.now().strftime("%Y-%m-%d")
@@ -282,12 +290,12 @@ def main():
                                     "py_ok": PY_OK,
                                     "ihf_temperature": round(ihf_temperature, 2),
                                     "ihf_entering": round(ihf_entering, 2),
-                                    "spindle_speed": round(spindle_speed,2),
+                                    "spindle_speed": round(spindle_speed, 2),
                                     "spindle_feed": round(spindle_feed, 2),
-                                    "o2_gas_pressure": round(o2_gas_pressure,2),
-                                    "png_pressure": round(png_pressure,2)
+                                    "o2_gas_pressure": round(o2_gas_pressure, 2),
+                                    "png_pressure": round(png_pressure, 2)
                                 }
-
+                                logger.info(f'da_gas_pressure is {da_gas_pressure}')
                                 ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure,
                                                         png_pressure)
                                 logger.info(f'payload is {DATA}')
@@ -297,10 +305,11 @@ def main():
                                 gl_SPG_HEATING_LIST = []
                                 gl_OXYGEN_HEATING_LIST = []
                                 gl_PNG_PRESSURE_LIST = []
-                                ihf_temperature=0
-                                ihf_entering=0
-                                o2_gas_pressure=0
-                                png_pressure=0
+                                gl_DA_GAS_PRESSURE_LIST = []
+                                ihf_temperature = 0
+                                ihf_entering = 0
+                                o2_gas_pressure = 0
+                                png_pressure = 0
                             except Exception as e:
                                 logger.error(f'serial number is empty {e}')
                 except Exception as e:

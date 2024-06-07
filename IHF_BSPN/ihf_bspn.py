@@ -195,26 +195,28 @@ def post_data(DATA):
             print(DATA)
             print(send_req.status_code)
             send_req.raise_for_status()
-            data = ob_db.get_sync_data()
-            if data:
-                try:
-                    for value in data:
-                        payload = json.loads(value[0])
-                        print(f"Payload to send sync {payload}")
-                        sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                        sync_req.raise_for_status()
-                        print(f"payload send from sync data : {sync_req.status_code}")
-
-                except Exception as e:
-                    print(f"[-] Error in sending SYNC data {e}")
-                else:
-                    ob_db.delete_sync_data()
-            else:
-                print(f"Synced data is empty")
-
         except Exception as e:
             print(f"[-] Error in sending data TO API, {e}")
             ob_db.add_sync_data(DATA)
+
+
+def post_sync_data():
+    data = ob_db.get_sync_data()
+    if data:
+        try:
+            for value in data:
+                payload = json.loads(value[0])
+                print(f"Payload to send sync {payload}")
+                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+                sync_req.raise_for_status()
+                print(f"payload send from sync data : {sync_req.status_code}")
+
+        except Exception as e:
+            print(f"[-] Error in sending SYNC data {e}")
+        else:
+            ob_db.delete_sync_data()
+    else:
+        print(f"Synced data is empty")
 
 
 def main():
@@ -235,7 +237,7 @@ def main():
             logger.info(f'png_pressure_ is {png_pressure}')
             air_pressure = float_conversion([data[8], data[9]])
             logger.info(f'air_pressure_ is {air_pressure}')
-            DA_pressure = 4 #float_conversion([data[10], data[11]])
+            DA_pressure = 4  # float_conversion([data[10], data[11]])
             logger.info(f'DA_pressure_ is {DA_pressure}')
             if status[1] >= 10:
                 FL_STATUS = True
@@ -295,7 +297,8 @@ def main():
                                 "png_pressure": png_pressure
                             }
 
-                            ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure, png_pressure,
+                            ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure,
+                                                    png_pressure,
                                                     air_pressure, da_pressure, spindle_speed, spindle_feed)
                             post_data(DATA)
                             ob_db.delete_serial_number(serial_number)
@@ -331,4 +334,3 @@ if __name__ == '__main__':
             time.sleep(1)
     except KeyboardInterrupt:
         logger.error('Interrupted')
-

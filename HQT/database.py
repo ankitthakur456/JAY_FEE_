@@ -5,8 +5,6 @@ import ast
 import json
 
 logger = logging.getLogger('JayFee_log')
-
-
 class DBHelper:
     def __init__(self):
         self.connection = sqlite3.connect("JAYFEE.db", check_same_thread=False)
@@ -24,13 +22,20 @@ class DBHelper:
                                 """)
         self.cursor.execute("""CREATE TABLE IF NOT EXISTS running_data(
                             timestamp INTEGER,
-                            IHF_HEATING REAL,
-                            SPG_HEATING REAL,
-                            OXYGEN_HEATING REAL,
-                            PNG_PRESSURE REAL,
-                            AIR_PRESSURE REAL,
-                            DAAcetylenePressure REAL,
-                            serial_number TEXT)""")
+                            serial_number TEXT,
+                            harding_temp_control_1 REAL,
+                            harding_temp_control_2 REAL,
+                            harding_temp_control_3 REAL,
+                            harding_temp_control_4 REAL,
+                            tempering_temp_control_1 REAL,
+                            tempering_temp_control_2 REAL,
+                            tempering_temp_control_3 REAL,
+                           tempering_temp_control_4 REAL, 
+                           tempering_temp_control_5 REAL, 
+                           tempering_temp_control_6 REAL, 
+                           quanching_tank_temp_control REAL
+                            )""")
+
 
     # region queue functions
     def enqueue_serial_number(self, serial_number):
@@ -70,33 +75,38 @@ class DBHelper:
 
     # region running data functions
 
-    def save_running_data(self, serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                          PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure):
+    def save_running_data(self,serial_number, harding_temp_control_1, harding_temp_control_2, harding_temp_control_3,
+                          harding_temp_control_4, tempering_temp_control_1, tempering_temp_control_2, tempering_temp_control_3,
+                          tempering_temp_control_4, tempering_temp_control_5, tempering_temp_control_6, quanching_tank_temp_control):
         try:
             self.cursor.execute("""SELECT * FROM running_data WHERE serial_number = ?""",
                                 (serial_number,))
             data = self.cursor.fetchone()
             if data:
                 self.cursor.execute("""UPDATE running_data SET
-                timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
-                png_pressure = ?, air_pressure = ?, DAAcetylenePressure = ?
+                timestamp = ?, harding_temp_control_1 = ?, harding_temp_control_2 = ?, harding_temp_control_3 = ?,
+                harding_temp_control_4 = ?, tempering_temp_control_1 = ?, tempering_temp_control_2 = ?, tempering_temp_control_3= ?,
+                tempering_temp_control_4 = ?, tempering_temp_control_5 = ?, tempering_temp_control_6 = ?, quanching_tank_temp_control = ?
                 WHERE serial_number = ?""",
-                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE,
-                                     AIR_PRESSURE, DAAcetylenePressure, serial_number))
+                                    (time.time(), harding_temp_control_1, harding_temp_control_2, harding_temp_control_3, harding_temp_control_4,
+                                     tempering_temp_control_1, tempering_temp_control_2, tempering_temp_control_3, tempering_temp_control_4,
+                                     tempering_temp_control_5, tempering_temp_control_6, quanching_tank_temp_control, serial_number))
             else:
                 self.cursor.execute("""INSERT INTO running_data(timestamp, serial_number,
-                ihf_heating, spg_heating, oxygen_heating, png_pressure, air_pressure, DAAcetylenePressure)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                                    (time.time(), serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                                     PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure))
+                harding_temp_control_1, harding_temp_control_2, harding_temp_control_3, harding_temp_control_4, tempering_temp_control_1, tempering_temp_control_2,
+                tempering_temp_control_3, tempering_temp_control_4, tempering_temp_control_5, tempering_temp_control_6, quanching_tank_temp_control)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                    (time.time(), serial_number, harding_temp_control_1, harding_temp_control_2, harding_temp_control_3,
+                                     harding_temp_control_4, tempering_temp_control_1, tempering_temp_control_2, tempering_temp_control_3,
+                                     tempering_temp_control_4, tempering_temp_control_5, tempering_temp_control_6, quanching_tank_temp_control))
             self.connection.commit()
-            logger.info(f"[+] Successful, Running Data Saved to the database")
+            print(f"[+] Successful, Running Data Saved to the database")
         except Exception as error:
-            logger.error(f"[-] Failed to save running data. Error: {error}")
+            print(f"[-] Failed to save running data. Error: {error}")
 
-    # endregion
+    #endregion
 
-    # region Sync data TB database
+    #region Sync data TB database
     def add_sync_data(self, payload):
         try:
             self.cursor.execute("""SELECT * FROM sync_data
@@ -116,7 +126,7 @@ class DBHelper:
 
             self.connection.commit()
         except Exception as e:
-            logger.error(f'ERROR {e} Sync Data not added to the database')
+            print(f'ERROR {e} Sync Data not added to the database')
 
     def get_sync_data(self):
         try:
@@ -128,7 +138,7 @@ class DBHelper:
             else:
                 return []
         except Exception as e:
-            logger.error(f'ERROR {e} No Sync Data available')
+            print(f'ERROR {e} No Sync Data available')
             return []
 
     def delete_sync_data(self):
@@ -136,6 +146,6 @@ class DBHelper:
             # deleting the payload where ts is less than or equal to ts
             self.cursor.execute("""DELETE FROM sync_data """)
             self.connection.commit()
-            logger.info(f"Successful, Deleted from sync_data database")
+            print(f"Successful, Deleted from sync_data database")
         except Exception as e:
-            logger.info(f'Error in clear_sync_data {e} No sync Data to clear')
+            print(f'Error in clear_sync_data {e} No sync Data to clear')

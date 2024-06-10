@@ -11,7 +11,7 @@ import json
 import os
 import logging.config
 import logging.handlers
-from datetime import datetime
+from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
@@ -279,7 +279,7 @@ def main():
                             da_gas_pressure = max(gl_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()
-                                date = datetime.now().strftime("%Y-%m-%d")
+                                date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                                 DATA = {
                                     "serial_number": serial_number,
                                     "time_": time_,

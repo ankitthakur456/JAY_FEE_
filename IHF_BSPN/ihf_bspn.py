@@ -11,7 +11,7 @@ import json
 import os
 import logging.config
 import logging.handlers
-from datetime import datetime
+from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
@@ -278,7 +278,7 @@ def main():
                             o2_gas_pressure = round(max(gl_OXYGEN_HEATING_LIST), 2)
                             png_pressure = round(max(gl_PNG_PRESSURE_LIST), 2)
                             time_ = datetime.now().isoformat()
-                            date = datetime.now().strftime("%Y-%m-%d")
+                            date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                             DATA = {
                                 "serial_number": serial_number,
                                 "time_": time_,

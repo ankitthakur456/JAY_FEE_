@@ -34,14 +34,14 @@ logger = logging.getLogger('JayFee_log')
 GL_MACHINE_INFO = {
     'HQT-1': {
         'py_ok': True,
-        'ip': '192.168.0.1',
+        'ip': '192.168.0.157',
         'stage': 'HQT-1',
         'line': 'Line 1',
     },
-    'HQT': {
+    'HQT-2': {
         'py_ok': True,
-        'ip': "192.168.0.105",
-        'stage': 'HQT',
+        'ip': "192.168.0.152",
+        'stage': 'HQT-2',
         'line': 'Line 2',
     }
 }
@@ -91,15 +91,15 @@ def init_conf():
         with open('./conf/machine_config.conf', 'r') as f:
             data = f.readline().replace("\n", "")
             data = {data.split('=')[0]: data.split('=')[1]}
-            print(data)
-            print(type(data))
+            logging.info(data)
+            logging.info(type(data))
 
             GL_MACHINE_NAME = data['m_name']
             PY_OK = GL_MACHINE_INFO[GL_MACHINE_NAME]['py_ok']
             STAGE = GL_MACHINE_INFO[GL_MACHINE_NAME]["stage"]
             LINE = GL_MACHINE_INFO[GL_MACHINE_NAME]["line"]
             GL_IP = GL_MACHINE_INFO[GL_MACHINE_NAME]['ip']
-            print(f"[+] Machine_name is {GL_MACHINE_NAME}")
+            logging.info(f"[+] Machine_name is {GL_MACHINE_NAME}")
     except FileNotFoundError as e:
         logger.error(f'[-] machine_config.conf not found {e}')
         with open('./conf/machine_config.conf', 'w') as f:
@@ -185,7 +185,7 @@ def get_machine_data():
 
 def reading_status():
     try:
-        c = ModbusClient(host='192.168.0.152', port=510, unit_id=1, auto_open=True)
+        c = ModbusClient(host='192.168.0.157', port=510, unit_id=1, auto_open=True)
         regs = c.read_discrete_inputs(0, 2)
         return regs
     except Exception as err:
@@ -230,8 +230,7 @@ def post_data(DATA):
     if SEND_DATA:
         try:
             send_req = requests.post(API, json=DATA, headers=HEADERS, timeout=2)
-            print(DATA)
-            print(send_req.status_code)
+            logging.info(send_req.status_code)
             send_req.raise_for_status()
             data = ob_db.get_sync_data()
 
@@ -239,20 +238,20 @@ def post_data(DATA):
                 try:
                     for value in data:
                         payload = json.loads(value[0])
-                        print(f"Payload to send sync {payload}")
+                        logging.info(f"Payload to send sync {payload}")
                         sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
                         sync_req.raise_for_status()
-                        print(f"payload send from sync data : {sync_req.status_code}")
+                        logging.info(f"payload send from sync data : {sync_req.status_code}")
 
                 except Exception as e:
-                    print(f"[-] Error in sending SYNC data {e}")
+                    logging.error(f"[-] Error in sending SYNC data {e}")
                 else:
                     ob_db.delete_sync_data()
             else:
-                print(f"Synced data is empty")
+                logging.info(f"Synced data is empty")
 
         except Exception as e:
-            print(f"[-] Error in sending data TO API, {e}")
+            logging.error(f"[-] Error in sending data TO API, {e}")
             ob_db.add_sync_data(DATA)
 
 
@@ -266,18 +265,18 @@ def main():
             status = reading_status()
             logger.info(f"status from plc is {status}")
             logger.info("Door is closed. Outside the inner loop.")
-            if status[0]:
-                gl_HARDING_TEMP_1 = data.get('hardening_temp_control_1')
-                gl_HARDING_TEMP_2 = data.get('hardening_temp_control_2')
-                gl_HARDING_TEMP_3 = data.get('hardening_temp_control_3')
-                gl_HARDING_TEMP_4 = data.get('hardening_temp_control_4')
-                gl_TEMPERING_TEMP_1 = data.get('tempering_temp_control_1')
-                gl_TEMPERING_TEMP_2 = data.get('tempering_temp_control_2')
-                gl_TEMPERING_TEMP_3 = data.get('tempering_temp_control_3')
-                gl_TEMPERING_TEMP_4 = data.get('tempering_temp_control_4')
-                gl_TEMPERING_TEMP_5 = data.get('tempering_temp_control_5')
-                gl_TEMPERING_TEMP_6 = data.get('tempering_temp_control_6')
-                gl_QUENCHING_TANK_TEMP_CONTROL = data.get('quenching_tank_temp_control')
+            # if status[0]:
+            gl_HARDING_TEMP_1 = data.get('hardening_temp_control_1')
+            gl_HARDING_TEMP_2 = data.get('hardening_temp_control_2')
+            gl_HARDING_TEMP_3 = data.get('hardening_temp_control_3')
+            gl_HARDING_TEMP_4 = data.get('hardening_temp_control_4')
+            gl_TEMPERING_TEMP_1 = data.get('tempering_temp_control_1')
+            gl_TEMPERING_TEMP_2 = data.get('tempering_temp_control_2')
+            gl_TEMPERING_TEMP_3 = data.get('tempering_temp_control_3')
+            gl_TEMPERING_TEMP_4 = data.get('tempering_temp_control_4')
+            gl_TEMPERING_TEMP_5 = data.get('tempering_temp_control_5')
+            gl_TEMPERING_TEMP_6 = data.get('tempering_temp_control_6')
+            gl_QUENCHING_TANK_TEMP_CONTROL = data.get('quenching_tank_temp_control')
             # Perform other processing here
             logging.info("Processing inside inner loop...")
             serial_number = ob_db.get_first_serial_number()
@@ -287,7 +286,7 @@ def main():
                 asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
                 try:
                     time_ = datetime.now().isoformat()
-                    date = datetime.now().strftime("%Y-%m-%d")
+                    date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                     DATA = {
                         "serial_number": serial_number,
                         "time_": time_,
@@ -296,17 +295,17 @@ def main():
                         "machine": GL_MACHINE_NAME,
                         "shift": shift,
                         "py_ok": PY_OK,
-                        "hardening_temp_control_1": 840,
-                        "hardening_temp_control_2": 840,
-                        "hardening_temp_control_3": 840,
-                        "hardening_temp_control_4": 840,
-                        "tempering_temp_control_1": 540,
-                        "tempering_temp_control_2": 540,
-                        "tempering_temp_control_3": 540,
-                        "tempering_temp_control_4": 540,
-                        "tempering_temp_control_5": 540,
-                        "tempering_temp_control_6": 540,
-                        "quenching_tank_temp_control": 40
+                        "hardening_temp_control_1": gl_HARDING_TEMP_1,
+                        "hardening_temp_control_2": gl_HARDING_TEMP_2,
+                        "hardening_temp_control_3": gl_HARDING_TEMP_3,
+                        "hardening_temp_control_4": gl_HARDING_TEMP_4,
+                        "tempering_temp_control_1": gl_TEMPERING_TEMP_1,
+                        "tempering_temp_control_2": gl_TEMPERING_TEMP_2,
+                        "tempering_temp_control_3": gl_TEMPERING_TEMP_3,
+                        "tempering_temp_control_4": gl_TEMPERING_TEMP_4,
+                        "tempering_temp_control_5": gl_TEMPERING_TEMP_5,
+                        "tempering_temp_control_6": gl_TEMPERING_TEMP_6,
+                        "quenching_tank_temp_control": gl_QUENCHING_TANK_TEMP_CONTROL
                     }
 
                     ob_db.save_running_data(serial_number, gl_HARDING_TEMP_1, gl_HARDING_TEMP_2, gl_HARDING_TEMP_3,

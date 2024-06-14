@@ -21,9 +21,9 @@ load_dotenv()
 
 # logs dir
 if not os.path.isdir("./logs"):
-    print("[-] logs directory doesn't exists")
+    logging.info("[-] logs directory doesn't exists")
     os.mkdir("./logs")
-    print("[+] Created logs dir successfully")
+    logging.info("[+] Created logs dir successfully")
 dirname = os.path.dirname(os.path.abspath(__file__))
 logging.config.fileConfig('logging.config')
 logger = logging.getLogger('JayFee_log')
@@ -49,7 +49,10 @@ PASSWORD = os.getenv('PASSWORD')
 PORT = os.getenv('PORT')
 USERNAME_ = os.getenv("USERNAME_")
 
-ADD_SERIAL_NUMBER = os.getenv('ADD_SERIAL_NUMBER')
+# ADD_QUEUE_NAMES = os.getenv('ADD_QUEUE_NAMES')
+ADD_QUEUE_NAME = 'add_srl_100_1'
+ADD_QUEUE_NAME1 = 'priority_add_srl_100_1'
+
 DEL_SERIAL_NUMBER = os.getenv('DEL_SERIAL_NUMBER')
 SEND_ACK_ADDING = os.getenv('SEND_ACK_ADDING')
 SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
@@ -87,15 +90,15 @@ def init_conf():
         with open('./conf/machine_config.conf', 'r') as f:
             data = f.readline().replace("\n", "")
             data = {data.split('=')[0]: data.split('=')[1]}
-            print(data)
-            print(type(data))
+            logging.info(data)
+            logging.info(type(data))
 
             GL_MACHINE_NAME = data['m_name']
             PY_OK = GL_MACHINE_INFO[GL_MACHINE_NAME]['py_ok']
             STAGE = GL_MACHINE_INFO[GL_MACHINE_NAME]["stage"]
             LINE = GL_MACHINE_INFO[GL_MACHINE_NAME]["line"]
             GL_IP = GL_MACHINE_INFO[GL_MACHINE_NAME]['ip']
-            print(f"[+] Machine_name is {GL_MACHINE_NAME}")
+            logging.info(f"[+] Machine_name is {GL_MACHINE_NAME}")
     except FileNotFoundError as e:
         logger.error(f'[-] machine_config.conf not found {e}')
         with open('./conf/machine_config.conf', 'w') as f:
@@ -154,27 +157,38 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    credentials = pika.PlainCredentials(username, password)
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port, credentials=credentials))
-    channel = connection.channel()
-    channel.queue_declare(queue=queue_name, durable=True)
-
-    def callback(ch, method, properties, body):
-        logger.info(f" [x] Received {body} ")
+async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+    def queue1_callback(ch, method, properties, body):
+        logging.info(" [x] Received queue 1: %r" % body)
         ob_db.enqueue_serial_number(body.decode('utf-8'))
-        # Send acknowledgment
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        return body
 
-    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
-    logger.info(' [*] Waiting for messages.')
-    # Start consuming
-    channel.start_consuming()
+    def queue2_callback(ch, method, properties, body):
+        logging.info(" [x] Received queue 2: %r" % body)
+        ob_db.enqueue_priority_serial(body.decode('utf-8'))
+
+    def on_open(connection):
+        connection.channel(on_open_callback=on_channel_open)
+
+    def on_channel_open(channel):
+        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
+        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
+
+    while True:
+        try:
+            credentials = pika.PlainCredentials(username, password)
+            parameters = pika.ConnectionParameters(host, port, '/', credentials)
+            connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
+            connection.ioloop.start()
+        except Exception as e:
+            logger.error(f'Exception in receive_message: {e}')
+            time.sleep(5)  # Retry after 5 seconds
 
 
-def thread_target(queue_name):
-    asyncio.run(receive_message(queue_name))
+
+def thread_target(queue_name1, queue_name2):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(receive_message(queue_name1, queue_name2))
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -192,11 +206,11 @@ def post_data(DATA):
     if SEND_DATA:
         try:
             send_req = requests.post(API, json=DATA, headers=HEADERS, timeout=2)
-            print(DATA)
-            print(send_req.status_code)
+            logging.info(DATA)
+            logging.info(send_req.status_code)
             send_req.raise_for_status()
         except Exception as e:
-            print(f"[-] Error in sending data TO API, {e}")
+            logging.info(f"[-] Error in sending data TO API, {e}")
             ob_db.add_sync_data(DATA)
 
 
@@ -206,21 +220,21 @@ def post_sync_data():
         try:
             for value in data:
                 payload = json.loads(value[0])
-                print(f"Payload to send sync {payload}")
+                logging.info(f"Payload to send sync {payload}")
                 sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
                 sync_req.raise_for_status()
-                print(f"payload send from sync data : {sync_req.status_code}")
+                logging.info(f"payload send from sync data : {sync_req.status_code}")
 
         except Exception as e:
-            print(f"[-] Error in sending SYNC data {e}")
+            logging.info(f"[-] Error in sending SYNC data {e}")
         else:
             ob_db.delete_sync_data()
     else:
-        print(f"Synced data is empty")
+        logging.info(f"Synced data is empty")
 
 
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST
+    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
     while True:
         ob_db = DBHelper()
         try:
@@ -258,17 +272,13 @@ def main():
                     if FL_STATUS:
                         logger.info(f'cycle running')
                     if not FL_STATUS:
+                        priority_serial_number = ob_db.get_first_priority_serial()
+                        logging.info(f'priority_serial_number {priority_serial_number}')
                         serial_number = ob_db.get_first_serial_number()
-                        asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
+                        #asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
                         logging.info(f'serial number is {serial_number}')
                         shift = get_shift()
-                        if serial_number:
-                            logger.info(f'gl_IHF_HEATING_LIST list is {gl_IHF_HEATING_LIST}')
-                            # logger.info(f'gl_SPG_HEATING_LIST list is {gl_SPG_HEATING_LIST}')
-                            # logger.info(f'gl_OXYGEN_HEATING_LIST list is {gl_OXYGEN_HEATING_LIST}')
-                            # logger.info(f'gl_PNG_PRESSURE_LIST     list is {gl_PNG_PRESSURE_LIST}')
-                            # logger.info(f'gl_AIR_PRESSURE_LIST list is {gl_AIR_PRESSURE_LIST}')
-                            # logger.info(f'gl_AIR_PRESSURE_LIST list is {gl_DAACETYLENE_PRESSURE_LIST}')
+                        if priority_serial_number or serial_number:
                             ihf_temperature = round(max(gl_IHF_HEATING_LIST), 2)
                             ihf_entering = round(max(gl_SPG_HEATING_LIST), 2)
                             air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
@@ -279,8 +289,12 @@ def main():
                             png_pressure = round(max(gl_PNG_PRESSURE_LIST), 2)
                             time_ = datetime.now().isoformat()
                             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
+                            if priority_serial_number:
+                                Ser_Num = priority_serial_number
+                            else:
+                                Ser_Num = serial_number
                             DATA = {
-                                "serial_number": serial_number,
+                                "serial_number": Ser_Num,
                                 "time_": time_,
                                 "date_": date,
                                 "line": LINE,
@@ -297,11 +311,12 @@ def main():
                                 "png_pressure": png_pressure
                             }
 
-                            ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure,
+                            ob_db.save_running_data(Ser_Num, ihf_temperature, ihf_entering, o2_gas_pressure,
                                                     png_pressure,
                                                     air_pressure, da_pressure, spindle_speed, spindle_feed)
                             post_data(DATA)
-                            ob_db.delete_serial_number(serial_number)
+                            ob_db.delete_serial_number(Ser_Num)
+                            ob_db.delete_priority_serial(Ser_Num)
                             gl_IHF_HEATING_LIST = []
                             gl_SPG_HEATING_LIST = []
                             gl_OXYGEN_HEATING_LIST = []
@@ -315,22 +330,26 @@ def main():
             logger.error(f'error in executing main {err}')
 
 
+def check_threads(futures, executor):
+    for future in futures:
+        if future.done() or future.exception():
+            logger.info("Thread completed or raised an exception")
+            futures.remove(future)
+            futures.append(executor.submit(thread_target, ADD_QUEUE_NAME, ADD_QUEUE_NAME1))
+
+
+def main_executor():
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        futures.append(executor.submit(thread_target, ADD_QUEUE_NAME, ADD_QUEUE_NAME1))
+        futures.append(executor.submit(main))
+        while True:
+            check_threads(futures, executor)
+            time.sleep(5)
+
+
 if __name__ == '__main__':
     try:
-        Serial_Number_Container = Queue()
-        with ThreadPoolExecutor() as executor:
-            future = executor.submit(thread_target, ADD_SERIAL_NUMBER)
-            future1 = executor.submit(main)
-            if future.done():
-                logger.info("thread_target task completed")
-            else:
-                logger.error("thread_target task still running")
-
-            if future1.done():
-                logger.info("main task completed")
-            else:
-                logger.error("main task still running")
-                # Sleep for a specified time before the next iteration
-            time.sleep(1)
+        main_executor()
     except KeyboardInterrupt:
         logger.error('Interrupted')

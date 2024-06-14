@@ -14,7 +14,7 @@ import os
 import logging.config
 import logging.handlers
 from datetime import datetime, timedelta
-import struct
+import time
 from conversions import get_shift
 from dotenv import load_dotenv
 
@@ -56,6 +56,7 @@ DEL_SERIAL_NUMBER = os.getenv('DEL_SERIAL_NUMBER')
 SEND_ACK_ADDING = os.getenv('SEND_ACK_ADDING')
 SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
 SEND_DATA_QUEUE = os.getenv('SEND_DATA_QUEUE')
+ADD_SERIAL_NUMBER1 = 'priority_add_srl_500_1'
 SEND_DATA = True
 API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_hqt_data/"
 
@@ -72,6 +73,7 @@ ihf_temperature = 0
 ihf_entering = 0
 o2_gas_pressure = 0
 png_pressure = 0
+
 
 # DATA GATHERING
 
@@ -192,27 +194,37 @@ def reading_status():
         logger.error(f'Error PLC disconnected {err}')
 
 
-async def receive_message(queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    credentials = pika.PlainCredentials(username, password)
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port, credentials=credentials))
-    channel = connection.channel()
-    channel.queue_declare(queue=queue_name, durable=True)
-
-    def callback(ch, method, properties, body):
-        logger.info(f" [x] Received {body} ")
+async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+    def queue1_callback(ch, method, properties, body):
+        logging.info(" [x] Received queue 1: %r" % body)
         ob_db.enqueue_serial_number(body.decode('utf-8'))
-        # Send acknowledgment
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        return body
 
-    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
-    logger.info(' [*] Waiting for messages.')
-    # Start consuming
-    channel.start_consuming()
+    def queue2_callback(ch, method, properties, body):
+        logging.info(" [x] Received queue 2: %r" % body)
+        ob_db.enqueue_priority_serial(body.decode('utf-8'))
+
+    def on_open(connection):
+        connection.channel(on_open_callback=on_channel_open)
+
+    def on_channel_open(channel):
+        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
+        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
+
+    while True:
+        credentials = pika.PlainCredentials(username, password)
+        parameters = pika.ConnectionParameters(host, port, '/', credentials)
+        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
+        try:
+            connection.ioloop.start()
+        except KeyboardInterrupt:
+            connection.close()
+            connection.ioloop.start()
 
 
-def thread_target(queue_name):
-    asyncio.run(receive_message(queue_name))
+def thread_target(queue_name1, queue_name2):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(receive_message(queue_name1, queue_name2))
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -230,29 +242,31 @@ def post_data(DATA):
     if SEND_DATA:
         try:
             send_req = requests.post(API, json=DATA, headers=HEADERS, timeout=2)
-            logging.info(send_req.status_code)
+            print(DATA)
+            print(send_req.status_code)
             send_req.raise_for_status()
-            data = ob_db.get_sync_data()
+        except Exception as e:
+            print(f"[-] Error in sending data TO API, {e}")
+            ob_db.add_sync_data(DATA)
 
-            if data:
-                try:
-                    for value in data:
-                        payload = json.loads(value[0])
-                        logging.info(f"Payload to send sync {payload}")
-                        sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                        sync_req.raise_for_status()
-                        logging.info(f"payload send from sync data : {sync_req.status_code}")
 
-                except Exception as e:
-                    logging.error(f"[-] Error in sending SYNC data {e}")
-                else:
-                    ob_db.delete_sync_data()
-            else:
-                logging.info(f"Synced data is empty")
+def post_sync_data():
+    data = ob_db.get_sync_data()
+    if data:
+        try:
+            for value in data:
+                payload = json.loads(value[0])
+                print(f"Payload to send sync {payload}")
+                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+                sync_req.raise_for_status()
+                print(f"payload send from sync data : {sync_req.status_code}")
 
         except Exception as e:
-            logging.error(f"[-] Error in sending data TO API, {e}")
-            ob_db.add_sync_data(DATA)
+            print(f"[-] Error in sending SYNC data {e}")
+        else:
+            ob_db.delete_sync_data()
+    else:
+        print(f"Synced data is empty")
 
 
 def main():
@@ -260,6 +274,7 @@ def main():
     while True:
         ob_db = DBHelper()
         try:
+            post_sync_data()
             data = get_machine_data()
             logging.info(f'data rom salave is {data}')
             status = reading_status()
@@ -279,8 +294,14 @@ def main():
             gl_QUENCHING_TANK_TEMP_CONTROL = data.get('quenching_tank_temp_control')
             # Perform other processing here
             logging.info("Processing inside inner loop...")
-            serial_number = ob_db.get_first_serial_number()
-            logging.info(f'serial number is {serial_number}')
+            serial_number_ = ob_db.get_first_serial_number()
+            logging.info(f'serial number is {serial_number_}')
+            priority_serial_number = ob_db.get_first_priority_serial()
+            logging.info(f'priority_serial_number is {priority_serial_number}')
+            if not priority_serial_number:
+                serial_number = serial_number_
+            else:
+                serial_number = priority_serial_number
             if serial_number and status[1]:
                 shift = get_shift()
                 asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
@@ -316,26 +337,35 @@ def main():
                     logger.info(f'payload is {DATA}')
                     post_data(DATA)
                     ob_db.delete_serial_number(serial_number)
+                    ob_db.delete_priority_serial(serial_number)
                 except Exception as e:
                     logger.error(f'serial number is empty {e}')
         except Exception as err:
             logger.error(f'error in executing main {err}')
 
 
+def check_threads(futures):
+    for future in futures:
+        if future.done() or future.exception():
+            logger.info("Thread completed or raised an exception")
+            # Trigger the receive_message function
+            asyncio.run(receive_message(ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
+
+
+def main_executor():
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        futures.append(executor.submit(thread_target, ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
+        futures.append(executor.submit(main))
+
+        # Monitor the threads periodically
+        while True:
+            check_threads(futures)
+            time.sleep(5)  # Adjust the interval as needed
+
+
 if __name__ == '__main__':
     try:
-        Serial_Number_Container = Queue()
-        with ThreadPoolExecutor() as executor:
-            future = executor.submit(thread_target, ADD_SERIAL_NUMBER)
-            future1 = executor.submit(main)
-            if future.done():
-                logger.info("thread_target task completed")
-            else:
-                logger.info("thread_target task still running")
-            if future1.done():
-                logger.info("main task completed")
-            else:
-                logger.info("main task still running")
-                # Sleep for a specified time before the next iteration
+        main_executor()
     except KeyboardInterrupt:
         logger.error('Interrupted')

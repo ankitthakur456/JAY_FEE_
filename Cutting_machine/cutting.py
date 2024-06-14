@@ -3,6 +3,9 @@ import requests
 import os
 import logging.config
 import logging.handlers
+import time
+from conversions import get_shift
+
 # logs dir
 if not os.path.isdir("./logs"):
     logging.info("[-] logs directory doesn't exists")
@@ -28,11 +31,12 @@ GL_MACHINE_INFO = {
     }
 }
 
-HOST = os.getenv('HOST')
 SEND_DATA = True
-API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_hqt_data/"
-
+HOST = 'ithingspro.cloud'
+ACCESS_TOKEN = ''
+PREV_SHIFT = 'A'
 HEADERS = {"Content-Type": "application/json"}
+
 
 # DATA GATHERING
 
@@ -75,13 +79,50 @@ logger.info(f"[+] Machine stage is {STAGE}")
 logger.info(f"[+] Machine IP is {GL_IP}")
 logger.info(f"[+] Trigger topic is {PY_OK}")
 
-def post_data(DATA):
+
+def Connection():
+    global GL_IP
+    c = ModbusClient(host=GL_IP, port=510, unit_id=1, auto_open=True)
+    return c
+
+
+def Reading_data():
+    try:
+        c = Connection()
+        regs = c.read_input_registers(0, 10)
+        c.close()
+        return regs
+    except Exception as err:
+        logger.error(f'Error is in Reading Data from PLC {err}')
+
+
+def post_data(payload):
+    """posting OEE DATA to the SERVER"""
+    url = f'http://{HOST}/api/v1/{ACCESS_TOKEN}/telemetry'
+    logging.info("[+] Sending data to server")
     if SEND_DATA:
         try:
-            send_req = requests.post(API, json=DATA, headers=HEADERS, timeout=2)
-            logging.info(DATA)
+            send_req = requests.post(url, json=payload, headers=HEADERS, timeout=2)
             logging.info(send_req.status_code)
             send_req.raise_for_status()
-        except Exception as e:
-            logging.error(f"[-] Error in sending data TO API, {e}")
+        except Exception as er:
+            logging.error(f"[-] Error in sending Cycle time data {er}")
 
+
+if __name__ == '__main__':
+    try:
+        while True:
+            data = Reading_data()
+            logging.info(f'data from plc is {data}')
+            shift = get_shift()
+            if data:
+                payload = {'status': data, 'shift': shift}
+                post_data(payload)
+                time.sleep(2)
+            if shift != PREV_SHIFT:
+                payload1 = {'shift': shift}
+                post_data(payload1)
+                PREV_SHIFT = shift
+
+    except KeyboardInterrupt:
+        logger.info('Interrupted')

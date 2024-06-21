@@ -173,22 +173,22 @@ async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, userna
         channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
         channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
 
-    while True:
-        try:
-            credentials = pika.PlainCredentials(username, password)
-            parameters = pika.ConnectionParameters(host, port, '/', credentials)
-            connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
-            connection.ioloop.start()
-        except Exception as e:
-            logger.error(f'Exception in receive_message: {e}')
-            time.sleep(5)  # Retry after 5 seconds
-
+    try:
+        credentials = pika.PlainCredentials(username, password)
+        parameters = pika.ConnectionParameters(host, port, '/', credentials)
+        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
+        connection.ioloop.start()
+    except Exception as e:
+        logger.error(f'Exception in receive_message: {e}')
+        time.sleep(5)  # Retry after 5 seconds
 
 
 def thread_target(queue_name1, queue_name2):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(receive_message(queue_name1, queue_name2))
+    while True:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(receive_message(queue_name1, queue_name2))
+        time.sleep(0.5)
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -217,20 +217,30 @@ def post_data(DATA):
 def post_sync_data():
     data = ob_db.get_sync_data()
     if data:
-        try:
-            for value in data:
-                payload = json.loads(value[0])
-                logging.info(f"Payload to send sync {payload}")
-                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                sync_req.raise_for_status()
-                logging.info(f"payload send from sync data : {sync_req.status_code}")
+        data_list = [json.loads(item[0]) for item in data]
 
-        except Exception as e:
-            logging.info(f"[-] Error in sending SYNC data {e}")
-        else:
-            ob_db.delete_sync_data()
+        # Format each payload
+        def format_payload(payload):
+            if isinstance(payload['serial_number'], str):
+                payload['serial_number'] = str(payload['serial_number'])
+            if isinstance(payload['time_'], str):
+                payload['time_'] = str(payload['time_'])
+            if isinstance(payload['date_'], str):
+                payload['date_'] = str(payload['date_'])
+            return payload
+
+        formatted_data_list = [format_payload(data) for data in data_list]
+        for payload in formatted_data_list:
+            response = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+
+            if response.status_code == 200:
+                logger.info(f"Data sent successfully: {payload}")
+                ob_db.delete_sync_data()
+            else:
+                logger.info(f"Error {response.status_code}: {response.text}")
+
     else:
-        logging.info(f"Synced data is empty")
+        logger.info(f"Synced data is empty")
 
 
 def main():
@@ -240,10 +250,11 @@ def main():
         try:
             data = Reading_data()
             status = reading_status()
-            logging.info(f'status from plc is {status}')
-            ihf_heating = float_conversion([data[0], data[1]])
+            post_sync_data()
+            logger.info(f'status from plc is {status}')
+            ihf_heating = float_conversion([data[2], data[3]])
             logger.info(f'ihf_heating_ is {ihf_heating}')
-            spg_heating = float_conversion([data[2], data[3]])
+            spg_heating = float_conversion([data[0], data[1]])
             logger.info(f'spg_heating_ is {spg_heating}')
             oxygen_heating = float_conversion([data[4], data[5]])
             logger.info(f'oxygen_heating_ is {oxygen_heating}')
@@ -253,15 +264,16 @@ def main():
             logger.info(f'air_pressure_ is {air_pressure}')
             DA_pressure = 4  # float_conversion([data[10], data[11]])
             logger.info(f'DA_pressure_ is {DA_pressure}')
-            if status[1] >= 10:
+            if spg_heating > 700:
+                gl_SPG_HEATING_LIST.append(spg_heating)
+            if ihf_heating >= 750:
                 FL_STATUS = True
                 logger.info(f'cycle running')
-            elif status[1] == 0:
+            elif ihf_heating <= 750:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
             if FL_STATUS:
                 gl_IHF_HEATING_LIST.append(ihf_heating)
-                gl_SPG_HEATING_LIST.append(spg_heating)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_AIR_PRESSURE_LIST.append(air_pressure)
@@ -273,14 +285,16 @@ def main():
                         logger.info(f'cycle running')
                     if not FL_STATUS:
                         priority_serial_number = ob_db.get_first_priority_serial()
-                        logging.info(f'priority_serial_number {priority_serial_number}')
+                        logger.info(f'priority_serial_number {priority_serial_number}')
                         serial_number = ob_db.get_first_serial_number()
-                        #asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
-                        logging.info(f'serial number is {serial_number}')
+                        # asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
+                        logger.info(f'serial number is {serial_number}')
                         shift = get_shift()
                         if priority_serial_number or serial_number:
-                            ihf_temperature = round(max(gl_IHF_HEATING_LIST), 2)
-                            ihf_entering = round(max(gl_SPG_HEATING_LIST), 2)
+                            logger.info(f'ihf heating list {gl_IHF_HEATING_LIST}')
+                            logger.info(f'spg heating list {gl_SPG_HEATING_LIST}')
+                            ihf_entering = round(max(gl_IHF_HEATING_LIST), 2)
+                            spg_temp = round(max(gl_SPG_HEATING_LIST), 2)
                             air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
                             spindle_speed = 150
                             spindle_feed = 300
@@ -301,7 +315,7 @@ def main():
                                 "machine": GL_MACHINE_NAME,
                                 "shift": shift,
                                 "py_ok": PY_OK,
-                                "ihf_temperature": ihf_temperature,
+                                "ihf_temperature": spg_temp,
                                 "ihf_entering": ihf_entering,
                                 "spindle_speed": spindle_speed,
                                 "spindle_feed": spindle_feed,
@@ -311,7 +325,7 @@ def main():
                                 "png_pressure": png_pressure
                             }
 
-                            ob_db.save_running_data(Ser_Num, ihf_temperature, ihf_entering, o2_gas_pressure,
+                            ob_db.save_running_data(Ser_Num, spg_temp, ihf_entering, o2_gas_pressure,
                                                     png_pressure,
                                                     air_pressure, da_pressure, spindle_speed, spindle_feed)
                             post_data(DATA)
@@ -323,9 +337,11 @@ def main():
                             gl_PNG_PRESSURE_LIST = []
                             gl_AIR_PRESSURE_LIST = []
                             gl_DAACETYLENE_PRESSURE_LIST = []
+
                 except Exception as e:
                     logger.info(f'error is in {e}')
             PREV_FL_STATUS = FL_STATUS
+            time.sleep(0.5)
         except Exception as err:
             logger.error(f'error in executing main {err}')
 

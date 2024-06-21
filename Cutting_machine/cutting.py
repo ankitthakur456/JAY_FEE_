@@ -19,7 +19,7 @@ logger = logging.getLogger('JayFee_log')
 GL_MACHINE_INFO = {
     'cutting-1': {
         'py_ok': True,
-        'ip': '192.168.0.157',
+        'ip': '192.168.0.135',
         'stage': 'HQT-1',
         'line': 'Line 1',
     },
@@ -33,11 +33,11 @@ GL_MACHINE_INFO = {
 
 SEND_DATA = True
 HOST = 'ithingspro.cloud'
-ACCESS_TOKEN = ''
+ACCESS_TOKEN = '0MQPNsT7hoE65h1BRtMV'
 PREV_SHIFT = 'A'
 HEADERS = {"Content-Type": "application/json"}
-
-
+STATUS = False
+SENT_FLAG = False
 # DATA GATHERING
 
 def init_conf():
@@ -91,6 +91,7 @@ def Reading_data():
         c = Connection()
         regs = c.read_input_registers(0, 10)
         c.close()
+        time.sleep(2)
         return regs
     except Exception as err:
         logger.error(f'Error is in Reading Data from PLC {err}')
@@ -115,10 +116,16 @@ if __name__ == '__main__':
             data = Reading_data()
             logging.info(f'data from plc is {data}')
             shift = get_shift()
-            if data:
-                payload = {'status': data, 'shift': shift}
+            if not SENT_FLAG and data[1]:
+                payload = {'status': 'on', 'shift': shift}
                 post_data(payload)
+                SENT_FLAG = True
                 time.sleep(2)
+                STATUS = False
+            if not data[1] and SENT_FLAG:
+                payload = {'status': 'off', 'shift': shift}
+                post_data(payload)
+                SENT_FLAG = False
             if shift != PREV_SHIFT:
                 payload1 = {'shift': shift}
                 post_data(payload1)

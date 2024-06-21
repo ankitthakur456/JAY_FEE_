@@ -187,6 +187,7 @@ async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, userna
 def thread_target(queue_name1, queue_name2):
     while True:
         asyncio.run(receive_message(queue_name1, queue_name2))
+        time.sleep(0.5)
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -215,20 +216,30 @@ def post_data(DATA):
 def post_sync_data():
     data = ob_db.get_sync_data()
     if data:
-        try:
-            for value in data:
-                payload = json.loads(value[0])
-                print(f"Payload to send sync {payload}")
-                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                sync_req.raise_for_status()
-                print(f"payload send from sync data : {sync_req.status_code}")
+        data_list = [json.loads(item[0]) for item in data]
 
-        except Exception as e:
-            print(f"[-] Error in sending SYNC data {e}")
-        else:
-            ob_db.delete_sync_data()
+        # Format each payload
+        def format_payload(payload):
+            if isinstance(payload['serial_number'], str):
+                payload['serial_number'] = str(payload['serial_number'])
+            if isinstance(payload['time_'], str):
+                payload['time_'] = str(payload['time_'])
+            if isinstance(payload['date_'], str):
+                payload['date_'] = str(payload['date_'])
+            return payload
+
+        formatted_data_list = [format_payload(data) for data in data_list]
+        for payload in formatted_data_list:
+            response = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+
+            if response.status_code == 200:
+                logger.info(f"Data sent successfully: {payload}")
+                ob_db.delete_sync_data()
+            else:
+                logger.info(f"Error {response.status_code}: {response.text}")
+
     else:
-        print(f"Synced data is empty")
+        logger.info(f"Synced data is empty")
 
 
 def main():
@@ -257,9 +268,10 @@ def main():
             elif status[1] == 0:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
+            if spg_heating > 750:
+                gl_SPG_HEATING_LIST.append(spg_heating)
             if FL_STATUS:
                 gl_IHF_HEATING_LIST.append(ihf_heating)
-                gl_SPG_HEATING_LIST.append(spg_heating)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
@@ -287,6 +299,8 @@ def main():
                             logger.info(f'gl_DA_GAS_PRESSURE_LIST list is {gl_DA_GAS_PRESSURE_LIST}')
                             ihf_temperature = max(gl_IHF_HEATING_LIST)
                             ihf_entering = max(gl_SPG_HEATING_LIST)
+                            if not gl_SPG_HEATING_LIST:
+                                ihf_entering = 0
                             spindle_speed = 150
                             spindle_feed = 300
                             o2_gas_pressure = max(gl_OXYGEN_HEATING_LIST)
@@ -332,7 +346,7 @@ def main():
                 except Exception as e:
                     logger.error(f'serial number is empty {e}')
             PREV_FL_STATUS = FL_STATUS
-            time.sleep(2)
+            time.sleep(0.5)
         except Exception as err:
             logger.error(f'error in executing main {err}')
 
@@ -354,7 +368,7 @@ def main_executor():
         # Monitor the threads periodically
         while True:
             check_threads(futures)
-            time.sleep(2)  # Adjust the interval as needed
+            time.sleep(0.5)  # Adjust the interval as needed
 
 
 if __name__ == '__main__':

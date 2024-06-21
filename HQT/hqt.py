@@ -210,15 +210,14 @@ async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, userna
         channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
         channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
 
-    while True:
-        credentials = pika.PlainCredentials(username, password)
-        parameters = pika.ConnectionParameters(host, port, '/', credentials)
-        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
-        try:
-            connection.ioloop.start()
-        except KeyboardInterrupt:
-            connection.close()
-            connection.ioloop.start()
+    credentials = pika.PlainCredentials(username, password)
+    parameters = pika.ConnectionParameters(host, port, '/', credentials)
+    connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
+    try:
+        connection.ioloop.start()
+    except KeyboardInterrupt:
+        connection.close()
+        connection.ioloop.start()
 
 
 def thread_target(queue_name1, queue_name2):

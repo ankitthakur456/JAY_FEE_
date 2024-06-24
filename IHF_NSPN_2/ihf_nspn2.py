@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
+from statistics import mean
 
 # Load the .env file
 load_dotenv()
@@ -37,7 +38,7 @@ GL_MACHINE_INFO = {
     },
     'SPG-4': {
         'py_ok': True,
-        'ip': "192.168.0.107",
+        'ip': "192.168.0.109",
         'stage': 'IHF_NSPN-2',
         'line': 'Line 2',
     }
@@ -115,7 +116,7 @@ logger.info(f"[+] Trigger topic is {PY_OK}")
 
 
 def Connection():
-    c = ModbusClient(host='192.168.0.154', port=510, unit_id=1, auto_open=True)
+    c = ModbusClient(host='192.168.0.109', port=510, unit_id=1, auto_open=True)
     return c
 
 
@@ -136,7 +137,7 @@ def Reading_data():
 
 def reading_status():
     try:
-        c = ModbusClient(host='192.168.0.147', port=510, unit_id=1, auto_open=True)
+        c = ModbusClient(host='192.168.0.144', port=510, unit_id=1, auto_open=True)
         regs = c.read_holding_registers(0, 5)
         return regs
     except Exception as err:
@@ -157,37 +158,91 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    def queue1_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 1: %r" % body)
-        ob_db.enqueue_serial_number(body.decode('utf-8'))
+class RabbitMQConsumer:
+    def __init__(self, queue1, queue2, host, port, username, password):
+        self.queue1 = queue1
+        self.queue2 = queue2
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.connection = None
+        self.channel1 = None
+        self.channel2 = None
 
-    def queue2_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 2: %r" % body)
-        ob_db.enqueue_priority_serial(body.decode('utf-8'))
+    def on_connected(self, connection):
+        """Called when we are fully connected to RabbitMQ"""
+        connection.channel(on_open_callback=self.on_channel_open1)
+        connection.channel(on_open_callback=self.on_channel_open2)
 
-    def on_open(connection):
-        connection.channel(on_open_callback=on_channel_open)
+    def on_channel_open1(self, channel):
+        """Called when our channel has opened"""
+        self.channel1 = channel
+        self.channel1.queue_declare(queue=self.queue1, durable=True, exclusive=False, auto_delete=False,
+                                    callback=self.on_queue1_declared)
 
-    def on_channel_open(channel):
-        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
-        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
+    def on_channel_open2(self, channel):
+        """Called when our channel has opened"""
+        self.channel2 = channel
+        self.channel2.queue_declare(queue=self.queue2, durable=True, exclusive=False, auto_delete=False,
+                                    callback=self.on_queue2_declared)
 
-    while True:
-        credentials = pika.PlainCredentials(username, password)
-        parameters = pika.ConnectionParameters(host, port, '/', credentials)
-        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
+    def on_queue1_declared(self, frame):
+        """Called when RabbitMQ has told us our Queue has been declared, frame is the response from RabbitMQ"""
+        self.channel1.basic_consume(self.queue1, self.sync_on_message_from_queue1, auto_ack=True)
+
+    def on_queue2_declared(self, frame):
+        """Called when RabbitMQ has told us our Queue has been declared, frame is the response from RabbitMQ"""
+        self.channel2.basic_consume(self.queue2, self.sync_on_message_from_queue2, auto_ack=True)
+
+    def sync_on_message_from_queue1(self, channel, method, header, body):
+        """Synchronous wrapper to handle message from queue1"""
+        asyncio.run(self.on_message_from_queue1(channel, method, header, body))
+
+    def sync_on_message_from_queue2(self, channel, method, header, body):
+        """Synchronous wrapper to handle message from queue2"""
+        asyncio.run(self.on_message_from_queue2(channel, method, header, body))
+
+    async def on_message_from_queue1(self, channel, method, header, body):
+        """Called when we receive a message from RabbitMQ on queue1"""
+        message = body.decode('utf-8')
+        await asyncio.to_thread(ob_db.enqueue_serial_number, message)
+        print(f'This is normal queue: {message}')
+
+    async def on_message_from_queue2(self, channel, method, header, body):
+        """Called when we receive a message from RabbitMQ on queue2"""
+        message = body.decode('utf-8')
+        await asyncio.to_thread(ob_db.enqueue_priority_serial, message)
+        print(f'This is priority queue: {message}')
+
+    def on_close(self, connection, exception):
+        """Invoked when the connection is closed"""
+        connection.ioloop.stop()
+
+    def start_consuming(self):
+        """Starts the consuming process"""
+        credentials = pika.PlainCredentials(self.username, self.password)
+        parameters = pika.ConnectionParameters(self.host, self.port, '/', credentials)
+        self.connection = pika.SelectConnection(parameters, on_open_callback=self.on_connected,
+                                                on_close_callback=self.on_close)
         try:
-            connection.ioloop.start()
+            self.connection.ioloop.start()
         except KeyboardInterrupt:
-            connection.close()
-            connection.ioloop.start()
+            self.connection.close()
+            self.connection.ioloop.start()
 
 
-def thread_target(queue_name1, queue_name2):
-    while True:
-        asyncio.run(receive_message(queue_name1, queue_name2))
-        time.sleep(0.5)
+# Asynchronous function to run RabbitMQ consumer
+async def run_consumer_async(queue1, queue2):
+    consumer = RabbitMQConsumer(queue1, queue2, HOST, PORT, USERNAME_, PASSWORD)
+    await asyncio.to_thread(consumer.start_consuming)
+
+
+# Function to start the consumer in a new asyncio event loop
+def thread_target(queue1, queue2):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_consumer_async(queue1, queue2))
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -262,16 +317,17 @@ def main():
             logger.info(f'png_pressure_ is {png_pressure}')
             da_gas_pressure = round(float_conversion([data[8], data[9]]), 2)
             logger.info(f'da_gas_pressure is {da_gas_pressure}')
-            if status[1] >= 10:
+            if spg_heating >= 700:
                 FL_STATUS = True
                 logger.info(f'cycle running')
-            elif status[1] == 0:
+            elif spg_heating < 700:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
-            if spg_heating > 750:
-                gl_SPG_HEATING_LIST.append(spg_heating)
-            if FL_STATUS:
+            if ihf_heating > 750:
                 gl_IHF_HEATING_LIST.append(ihf_heating)
+            if FL_STATUS:
+                gl_SPG_HEATING_LIST.append(spg_heating)
+
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
@@ -297,15 +353,15 @@ def main():
                             logger.info(f'gl_OXYGEN_HEATING_LIST list is {gl_OXYGEN_HEATING_LIST}')
                             logger.info(f'gl_PNG_PRESSURE_LIST     list is {gl_PNG_PRESSURE_LIST}')
                             logger.info(f'gl_DA_GAS_PRESSURE_LIST list is {gl_DA_GAS_PRESSURE_LIST}')
-                            ihf_temperature = max(gl_IHF_HEATING_LIST)
-                            ihf_entering = max(gl_SPG_HEATING_LIST)
+                            ihf_temperature = mean(gl_IHF_HEATING_LIST)
+                            ihf_entering = mean(gl_SPG_HEATING_LIST)
                             if not gl_SPG_HEATING_LIST:
                                 ihf_entering = 0
                             spindle_speed = 150
                             spindle_feed = 300
-                            o2_gas_pressure = max(gl_OXYGEN_HEATING_LIST)
-                            png_pressure = max(gl_PNG_PRESSURE_LIST)
-                            da_gas_pressure = max(gl_DA_GAS_PRESSURE_LIST)
+                            o2_gas_pressure = mean(gl_OXYGEN_HEATING_LIST)
+                            png_pressure = mean(gl_PNG_PRESSURE_LIST)
+                            da_gas_pressure = mean(gl_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()
                                 date = (datetime.now() - timedelta(hours=7)).strftime("%F")
@@ -356,7 +412,7 @@ def check_threads(futures):
         if future.done() or future.exception():
             logger.info("Thread completed or raised an exception")
             # Trigger the receive_message function
-            asyncio.run(receive_message(ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
+            asyncio.run(thread_target(ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
 
 
 def main_executor():

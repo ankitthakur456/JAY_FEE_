@@ -4,7 +4,7 @@ Description=Machine HIS Service
 After=network.target
 
 [Service]
-ExecStart=/home/his/usr/venv/bin/python3 -u ihf1_bspn.py
+ExecStart=/home/his/usr/venv/bin/python3 -u ihf_nspg-2.py
 WorkingDirectory=/home/his/usr/
 StandardOutput=inherit
 StandardError=inherit

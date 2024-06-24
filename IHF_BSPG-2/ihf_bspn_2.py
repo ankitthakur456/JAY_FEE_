@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
-
+from statistics import mean
 # Load the .env file
 load_dotenv()
 
@@ -334,14 +334,14 @@ def main():
                         if priority_serial_number or serial_number:
                             logging.info(f'ihf heating list {gl_IHF_HEATING_LIST}')
                             logger.info(f'spg heating list {gl_SPG_HEATING_LIST}')
-                            ihf_entering = round(max(gl_IHF_HEATING_LIST), 2)
-                            spg_temp = round(max(gl_SPG_HEATING_LIST), 2)
-                            air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
+                            ihf_entering = round(mean(gl_IHF_HEATING_LIST), 2)
+                            spg_temp = round(mean(gl_SPG_HEATING_LIST), 2)
+                            air_pressure = round(mean(gl_AIR_PRESSURE_LIST), 2)
                             spindle_speed = 150
                             spindle_feed = 300
-                            da_pressure = round(max(gl_DAACETYLENE_PRESSURE_LIST), 2)
-                            o2_gas_pressure = round(max(gl_OXYGEN_HEATING_LIST), 2)
-                            png_pressure = round(max(gl_PNG_PRESSURE_LIST), 2)
+                            da_pressure = round(mean(gl_DAACETYLENE_PRESSURE_LIST), 2)
+                            o2_gas_pressure = round(mean(gl_OXYGEN_HEATING_LIST), 2)
+                            png_pressure = round(mean(gl_PNG_PRESSURE_LIST), 2)
                             time_ = datetime.now().isoformat()
                             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                             if priority_serial_number:

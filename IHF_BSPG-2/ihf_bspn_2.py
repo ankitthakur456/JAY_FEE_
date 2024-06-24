@@ -138,6 +138,7 @@ def reading_status():
     try:
         c = ModbusClient(host='192.168.0.154', port=510, unit_id=1, auto_open=True)
         regs = c.read_holding_registers(0, 5)
+
         return regs
     except Exception as err:
         logger.error(f'Error is in Reading Data from PLC {err}')
@@ -157,75 +158,89 @@ def float_conversion(registers):
     return result
 
 
-def receive_message(queue1, queue2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+class RabbitMQConsumer:
+    def __init__(self, queue1, queue2, host, port, username, password):
+        self.queue1 = queue1
+        self.queue2 = queue2
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.connection = None
+        self.channel1 = None
+        self.channel2 = None
 
-    def on_connected(connection):
+    def on_connected(self, connection):
         """Called when we are fully connected to RabbitMQ"""
-        # Open a channel
-        connection.channel(on_open_callback=on_channel_open)
-        connection.channel(on_open_callback=on_channel_open1)
+        connection.channel(on_open_callback=self.on_channel_open1)
+        connection.channel(on_open_callback=self.on_channel_open2)
 
-    # Step #3
-    def on_channel_open(new_channel):
+    def on_channel_open1(self, channel):
         """Called when our channel has opened"""
-        global channel
-        channel = new_channel
-        channel.queue_declare(queue=queue1, durable=True, exclusive=False, auto_delete=False,
-                              callback=on_queue_declared)
+        self.channel1 = channel
+        self.channel1.queue_declare(queue=self.queue1, durable=True, exclusive=False, auto_delete=False,
+                                    callback=self.on_queue1_declared)
 
-    def on_channel_open1(new_channel):
+    def on_channel_open2(self, channel):
         """Called when our channel has opened"""
-        global channel
-        channel = new_channel
-        channel.queue_declare(queue=queue2, durable=True, exclusive=False, auto_delete=False,
-                              callback=on_priority_queue_declared)
-    # Step #4
-    def on_queue_declared(frame):
+        self.channel2 = channel
+        self.channel2.queue_declare(queue=self.queue2, durable=True, exclusive=False, auto_delete=False,
+                                    callback=self.on_queue2_declared)
+
+    def on_queue1_declared(self, frame):
         """Called when RabbitMQ has told us our Queue has been declared, frame is the response from RabbitMQ"""
-        channel.basic_consume(queue1, on_message,  auto_ack=True)
+        self.channel1.basic_consume(self.queue1, self.sync_on_message_from_queue1, auto_ack=True)
 
-    # Step #5
-    def on_message(channel, method, header, body):
-        """Called when we receive a message from RabbitMQ"""
-        ob_db.enqueue_serial_number(body.decode('utf-8'))
-        print(f'this is normal queue {body}')
-
-    def on_priority_queue_declared(frame):
+    def on_queue2_declared(self, frame):
         """Called when RabbitMQ has told us our Queue has been declared, frame is the response from RabbitMQ"""
-        channel.basic_consume(queue1, priority_message, auto_ack=True)
+        self.channel2.basic_consume(self.queue2, self.sync_on_message_from_queue2, auto_ack=True)
 
-    # Step #5
-    def priority_message(channel, method, header, body):
-        """Called when we receive a message from RabbitMQ"""
+    def sync_on_message_from_queue1(self, channel, method, header, body):
+        """Synchronous wrapper to handle message from queue1"""
+        asyncio.run(self.on_message_from_queue1(channel, method, header, body))
 
-        print(f'this is perioty queue {body}')
+    def sync_on_message_from_queue2(self, channel, method, header, body):
+        """Synchronous wrapper to handle message from queue2"""
+        asyncio.run(self.on_message_from_queue2(channel, method, header, body))
 
-    # Closing
-    def on_close(connection, exception):
-        # Invoked when the connection is closed
+    async def on_message_from_queue1(self, channel, method, header, body):
+        """Called when we receive a message from RabbitMQ on queue1"""
+        message = body.decode('utf-8')
+        await asyncio.to_thread(ob_db.enqueue_serial_number, message)
+        print(f'This is normal queue: {message}')
+
+    async def on_message_from_queue2(self, channel, method, header, body):
+        """Called when we receive a message from RabbitMQ on queue2"""
+        message = body.decode('utf-8')
+        await asyncio.to_thread(ob_db.enqueue_priority_serial, message)
+        print(f'This is priority queue: {message}')
+
+    def on_close(self, connection, exception):
+        """Invoked when the connection is closed"""
         connection.ioloop.stop()
 
-    # Step #1: Connect to RabbitMQ using the default parameters
-    credentials = pika.PlainCredentials(username, password)
-    parameters = pika.ConnectionParameters(host, port, '/', credentials)
-    connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_connected, on_close_callback=on_close)
+    def start_consuming(self):
+        """Starts the consuming process"""
+        credentials = pika.PlainCredentials(self.username, self.password)
+        parameters = pika.ConnectionParameters(self.host, self.port, '/', credentials)
+        self.connection = pika.SelectConnection(parameters, on_open_callback=self.on_connected,
+                                                on_close_callback=self.on_close)
+        try:
+            self.connection.ioloop.start()
+        except KeyboardInterrupt:
+            self.connection.close()
+            self.connection.ioloop.start()
 
-    try:
-        # Loop so we can communicate with RabbitMQ
-        connection.ioloop.start()
-    except KeyboardInterrupt:
-        # Gracefully close the connection
-        connection.close()
-        # Loop until we're fully closed.
-        # The on_close callback is required to stop the io loop
-        connection.ioloop.start()
+# Asynchronous function to run RabbitMQ consumer
+async def run_consumer_async(queue1, queue2):
+    consumer = RabbitMQConsumer(queue1, queue2, HOST, PORT, USERNAME_, PASSWORD)
+    await asyncio.to_thread(consumer.start_consuming)
 
-
-
-def thread_target(queue_name1, queue_name2):
+# Function to start the consumer in a new asyncio event loop
+def thread_target(queue1, queue2):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(receive_message(queue_name1, queue_name2))
+    loop.run_until_complete(run_consumer_async(queue1, queue2))
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -313,7 +328,7 @@ def main():
                         priority_serial_number = ob_db.get_first_priority_serial()
                         logging.info(f'priority_serial_number {priority_serial_number}')
                         serial_number = ob_db.get_first_serial_number()
-                        #asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
+                        # asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
                         logging.info(f'serial number is {serial_number}')
                         shift = get_shift()
                         if priority_serial_number or serial_number:

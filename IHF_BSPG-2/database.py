@@ -15,6 +15,8 @@ class DBHelper:
         CREATE TABLE IF NOT EXISTS sync_data_table(ts INTEGER, payload STRING)""")  # sync_data_table
         self.cursor.execute("""CREATE TABLE IF NOT EXISTS queue(id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp REAL, serial_number STRING)""")
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS priority_queue(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL, serial_number STRING)""")
         self.cursor.execute("""CREATE TABLE IF NOT EXISTS
                                 sync_data(
                                     serial_number VARCHAR(2),
@@ -22,19 +24,19 @@ class DBHelper:
                                     shift VARCHAR(2),
                                     payload STRING)
                                 """)
-        self.cursor.execute("""CREATE TABLE IF NOT EXISTS running_data(
-                            timestamp INTEGER,
-                            IHF_HEATING REAL,
-                            SPG_HEATING REAL,
-                            OXYGEN_HEATING REAL,
-                            PNG_PRESSURE REAL,
-                            AIR_PRESSURE REAL,
-                            DAAcetylenePressure REAL,
-                            serial_number TEXT)""")
-        self.cursor.execute("""CREATE TABLE IF NOT EXISTS StoredValues (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                value REAL
-            )""")
+        self.cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS running_data(
+                        timestamp INTEGER,
+                        ihf_heating REAL,
+                        spg_heating REAL,
+                        oxygen_heating REAL,
+                        png_pressure REAL,
+                        air_pressure REAL,
+                        daacetylene_pressure REAL,
+                        spindle_speed REAL,
+                        spindle_feed REAL,
+                        serial_number TEXT PRIMARY KEY
+                    )""")
 
     # region queue functions
     def enqueue_serial_number(self, serial_number):
@@ -49,6 +51,40 @@ class DBHelper:
                 logger.info(f"[-] Failed, Serial Number Already Enqueued to the database")
         except Exception as e:
             logger.error(f"[-] Failed to enqueue serial number Error {e}")
+
+    def enqueue_priority_serial(self, serial_number):
+        try:
+            self.cursor.execute("""SELECT serial_number FROM priority_queue where serial_number = ?""",
+                                (serial_number,))
+            if self.cursor.fetchone() is None:
+                self.cursor.execute("""INSERT INTO priority_queue(serial_number, timestamp) VALUES(?,?)""",
+                                    (serial_number, time.time()))
+                self.connection.commit()
+                logger.info(f"[+] Successful, Serial Number Enqueued to the database")
+            else:
+                logger.info(f"[-] Failed, Serial Number Already Enqueued to the database")
+        except Exception as e:
+            logger.error(f"[-] Failed to enqueue serial number Error {e}")
+
+    def get_first_priority_serial(self):
+        try:
+            self.cursor.execute("""SELECT serial_number FROM priority_queue ORDER BY timestamp ASC LIMIT 1""")
+            serial_number = self.cursor.fetchone()[0]
+            if serial_number:
+                return serial_number
+            else:
+                return None
+        except Exception as e:
+            logger.error(f"[-] Failed to get first serial number Error {e}")
+            return None
+
+    def delete_priority_serial(self, serial_number):
+        try:
+            self.cursor.execute("""DELETE FROM priority_queue where serial_number =?""", (serial_number,))
+            self.connection.commit()
+            logger.info(f"[+] Successful, Serial Number Deleted from the database")
+        except Exception as e:
+            logger.error(f"[-] Failed to delete serial number Error {e}")
 
     def get_first_serial_number(self):
         try:
@@ -74,34 +110,37 @@ class DBHelper:
 
     # region running data functions
 
-    def save_running_data(self, serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                          PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure):
+    def save_running_data(self, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                          png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed):
         try:
-            self.cursor.execute("""SELECT * FROM running_data WHERE serial_number = ?""",
-                                (serial_number,))
+            self.cursor.execute("SELECT * FROM running_data WHERE serial_number = ?", (serial_number,))
             data = self.cursor.fetchone()
+            timestamp = int(time.time())
+
             if data:
-                self.cursor.execute("""UPDATE running_data SET
-                timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
-                png_pressure = ?, air_pressure = ?, DAAcetylenePressure = ?
-                WHERE serial_number = ?""",
-                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE,
-                                     AIR_PRESSURE, DAAcetylenePressure, serial_number))
+                self.cursor.execute("""
+                    UPDATE running_data SET
+                        timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
+                        png_pressure = ?, air_pressure = ?, daacetylene_pressure = ?, spindle_speed = ?, spindle_feed = ?
+                    WHERE serial_number = ?""",
+                                    (timestamp, ihf_heating, spg_heating, oxygen_heating, png_pressure,
+                                     air_pressure, daacetylene_pressure, spindle_speed, spindle_feed, serial_number))
             else:
-                self.cursor.execute("""INSERT INTO running_data(timestamp, serial_number,
-                ihf_heating, spg_heating, oxygen_heating, png_pressure, air_pressure, DAAcetylenePressure)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                                    (time.time(), serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                                     PNG_PRESSURE, AIR_PRESSURE, DAAcetylenePressure))
+                self.cursor.execute("""
+                    INSERT INTO running_data(timestamp, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                                             png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    (timestamp, serial_number, ihf_heating, spg_heating, oxygen_heating,
+                                     png_pressure, air_pressure, daacetylene_pressure, spindle_speed, spindle_feed))
+
             self.connection.commit()
-            logger.info(f"[+] Successful, Running Data Saved to the database")
+            logger.info("[+] Successful, Running Data Saved to the database")
         except Exception as error:
             logger.error(f"[-] Failed to save running data. Error: {error}")
 
     # endregion
 
     # region Sync data TB database
-
     def add_sync_data(self, payload):
         try:
             self.cursor.execute("""SELECT * FROM sync_data
@@ -144,16 +183,3 @@ class DBHelper:
             logger.info(f"Successful, Deleted from sync_data database")
         except Exception as e:
             logger.info(f'Error in clear_sync_data {e} No sync Data to clear')
-
-    ###################
-    # COUNTER VALUES
-
-    def insert_value(self, new_value):
-        self.cursor.execute('INSERT INTO StoredValues (value) VALUES (?);', (new_value,))
-
-    def get_and_clear_values(self):
-        self.cursor.execute('SELECT SUM(value) AS total_sum FROM StoredValues;')
-        total_sum = self.cursor.fetchone()[0]
-        self.cursor.execute('DELETE FROM StoredValues;')
-        self.cursor.close()
-        return total_sum

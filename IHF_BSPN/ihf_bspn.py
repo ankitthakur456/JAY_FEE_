@@ -266,14 +266,15 @@ def main():
             logger.info(f'DA_pressure_ is {DA_pressure}')
             if spg_heating > 700:
                 gl_SPG_HEATING_LIST.append(spg_heating)
-            if ihf_heating >= 750:
+            if ihf_heating > 750:
                 FL_STATUS = True
                 logger.info(f'cycle running')
             elif ihf_heating <= 750:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
             if FL_STATUS:
-                gl_IHF_HEATING_LIST.append(ihf_heating)
+                if ihf_heating < 1000:
+                    gl_IHF_HEATING_LIST.append(ihf_heating)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_AIR_PRESSURE_LIST.append(air_pressure)

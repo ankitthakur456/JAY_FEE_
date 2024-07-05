@@ -4,17 +4,20 @@ from pyModbusTCP.client import ModbusClient
 import requests
 from database import DBHelper
 import time
+from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
+from typing import List
 import json
 import os
+from typing import TypedDict, Union, Optional
 import logging.config
 import logging.handlers
 from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
+import socket
 
 # Load the .env file
 load_dotenv()
@@ -30,15 +33,15 @@ logger = logging.getLogger('JayFee_log')
 # end region
 
 GL_MACHINE_INFO = {
-    'SPG-1': {
+    'BS-1': {
         'py_ok': True,
         'ip': '192.168.0.103',
         'stage': 'IHF_BSPN',
         'line': 'Line 1',
     },
-    'SPG-2': {
+    '': {
         'py_ok': True,
-        'ip': '"192.168.0.107"',
+        'ip': '192.168.0.107',
         'stage': 'IHF_NSPN',
         'line': 'Line 1',
     }
@@ -63,8 +66,8 @@ HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
 FL_STATUS = False
+gl_IHF_ENTERING_LIST = []
 gl_IHF_HEATING_LIST = []
-gl_SPG_HEATING_LIST = []
 gl_OXYGEN_HEATING_LIST = []
 gl_PNG_PRESSURE_LIST = []
 gl_AIR_PRESSURE_LIST = []
@@ -122,7 +125,7 @@ def Connection():
 def Reading_data():
     try:
         c = Connection()
-        regs = c.read_input_registers(0, 12)
+        regs = c.read_input_registers(0, 13)
         logger.info(f"values from register is {regs}")
         c.close()
         if not regs:
@@ -143,7 +146,7 @@ def reading_status():
         logger.error(f'Error is in Reading Data from PLC {err}')
 
 
-def float_conversion(registers):
+def float_conversion(registers: List[int]) -> float:
     if len(registers) != 2:
         raise ValueError("Expected a list of two 16-bit registers")
     # Convert registers to bytes
@@ -157,38 +160,96 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    def queue1_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 1: %r" % body)
+def is_connected():
+    """ Check if the internet connection is available. """
+    try:
+        # Try to connect to a common DNS server (Google's public DNS)
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        return True
+    except OSError:
+        return False
+
+
+async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+    connection = None
+    while True:
+        if is_connected():
+            try:
+                logger.info("Internet connection is available. Attempting to connect...")
+                credentials = pika.PlainCredentials(username, password)
+                parameters = pika.ConnectionParameters(host, port, '/', credentials)
+
+                connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open,
+                                                   on_close_callback=on_close)
+                connection.ioloop.start()
+
+            except pika.exceptions.AMQPConnectionError as e:
+                logger.error(f'AMQP Connection Error: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            except Exception as e:
+                logger.error(f'General Exception in receive_message: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            finally:
+                if connection and connection.is_open:
+                    connection.close()
+        else:
+            logger.error("Internet connection is down. Waiting for reconnection...")
+            while not is_connected():
+                await asyncio.sleep(5)  # Check every 5 seconds for reconnection
+
+        logger.info("Reconnecting after a brief pause...")
+        await asyncio.sleep(5)  # Optional delay to prevent too frequent retries
+
+
+def on_open(connection):
+    logger.info("Connection opened.")
+    connection.channel(on_open_callback=on_channel_open)
+
+
+def on_channel_open(channel):
+    logger.info("Channel opened.")
+    channel.basic_consume(ADD_QUEUE_NAME, queue1_callback, auto_ack=True)
+    channel.basic_consume(ADD_QUEUE_NAME1, queue2_callback, auto_ack=True)
+
+
+def on_close(connection, reason):
+    logger.info(f"Connection closed: {reason}")
+    connection.ioloop.stop()
+
+
+def queue1_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 1: {body}")
+    if body:
         ob_db.enqueue_serial_number(body.decode('utf-8'))
 
-    def queue2_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 2: %r" % body)
+
+def queue2_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 2: {body}")
+    if body:
         ob_db.enqueue_priority_serial(body.decode('utf-8'))
 
-    def on_open(connection):
-        connection.channel(on_open_callback=on_channel_open)
 
-    def on_channel_open(channel):
-        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
-        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
-
+async def receive():
     try:
-        credentials = pika.PlainCredentials(username, password)
-        parameters = pika.ConnectionParameters(host, port, '/', credentials)
-        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
-        connection.ioloop.start()
+        while True:
+            await receive_message()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.error('Interrupted')
     except Exception as e:
-        logger.error(f'Exception in receive_message: {e}')
-        time.sleep(5)  # Retry after 5 seconds
+        logger.error(f'Exception in main: {e}')
 
 
-def thread_target(queue_name1, queue_name2):
-    while True:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(receive_message(queue_name1, queue_name2))
-        time.sleep(0.5)
+def thread_target():
+    asyncio.run(receive())
+
+
+# def thread_target(queue_name1: str, queue_name2: str):
+#     loop = asyncio.new_event_loop()
+#     asyncio.set_event_loop(loop)
+#     loop.run_until_complete(receive_message(queue_name1, queue_name2))
+#     loop.run_forever()
+#     time.sleep(0.5)
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -244,7 +305,7 @@ def post_sync_data():
 
 
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
+    global FL_STATUS, PREV_FL_STATUS, gl_IHF_HEATING_LIST, gl_IHF_ENTERING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
     while True:
         ob_db = DBHelper()
         try:
@@ -252,33 +313,37 @@ def main():
             status = reading_status()
             post_sync_data()
             logger.info(f'status from plc is {status}')
-            ihf_heating = float_conversion([data[2], data[3]])
+            ihf_entering = float_conversion([data[2], data[3]])
+            logger.info(f'ihf_entering_ is {ihf_entering}')
+            ihf_heating = float_conversion([data[0], data[1]])
             logger.info(f'ihf_heating_ is {ihf_heating}')
-            spg_heating = float_conversion([data[0], data[1]])
-            logger.info(f'spg_heating_ is {spg_heating}')
             oxygen_heating = float_conversion([data[4], data[5]])
             logger.info(f'oxygen_heating_ is {oxygen_heating}')
             png_pressure = float_conversion([data[6], data[7]])
             logger.info(f'png_pressure_ is {png_pressure}')
             air_pressure = float_conversion([data[8], data[9]])
             logger.info(f'air_pressure_ is {air_pressure}')
-            DA_pressure = 4  # float_conversion([data[10], data[11]])
+            DA_pressure = 1.5  # float_conversion([data[11], data[12]])
             logger.info(f'DA_pressure_ is {DA_pressure}')
-            if spg_heating > 700:
-                gl_SPG_HEATING_LIST.append(spg_heating)
-            if ihf_heating > 750:
+            if ihf_entering > 650:
+                gl_IHF_ENTERING_LIST.append(ihf_entering)
+            if oxygen_heating < 7:
+                gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
+            if ihf_heating > 700:
                 FL_STATUS = True
                 logger.info(f'cycle running')
-            elif ihf_heating <= 750:
+                logger.info(f'[++++++start time++++++++]{datetime.now().time()}')
+            elif ihf_heating < 700:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
+                logger.info(f'[++++++stop time++++++++]{datetime.now().time()}')
             if FL_STATUS:
                 if ihf_heating < 1000:
                     gl_IHF_HEATING_LIST.append(ihf_heating)
-                gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
+                # if ihf_entering < 900:
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_AIR_PRESSURE_LIST.append(air_pressure)
-                gl_DAACETYLENE_PRESSURE_LIST.append(DA_pressure)
+                gl_DAACETYLENE_PRESSURE_LIST.append(round(abs(DA_pressure), 2))
 
             if FL_STATUS != PREV_FL_STATUS:
                 try:
@@ -292,16 +357,20 @@ def main():
                         logger.info(f'serial number is {serial_number}')
                         shift = get_shift()
                         if priority_serial_number or serial_number:
-                            logger.info(f'ihf heating list {gl_IHF_HEATING_LIST}')
-                            logger.info(f'spg heating list {gl_SPG_HEATING_LIST}')
-                            ihf_entering = round(max(gl_IHF_HEATING_LIST), 2)
-                            spg_temp = round(max(gl_SPG_HEATING_LIST), 2)
+                            # logger.info(f'ihf heating list {gl_IHF_ENTERING_LIST}')
+                            # logger.info(f'spg heating list {gl_IHF_HEATING_LIST}')
+                            logger.info(
+                                f'gl_OXYGEN_HEATING_LIST {gl_OXYGEN_HEATING_LIST} and spg heating at that time is {gl_IHF_ENTERING_LIST}')
+                            # logger.info(f' gl_PNG_PRESSURE_LIST list {gl_PNG_PRESSURE_LIST}')
+                            ihf_entering = round(max(gl_IHF_ENTERING_LIST), 2)
+                            spg_temp = round(max(gl_IHF_HEATING_LIST), 2)
                             air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
                             spindle_speed = 150
                             spindle_feed = 300
-                            da_pressure = round(max(gl_DAACETYLENE_PRESSURE_LIST), 2)
-                            o2_gas_pressure = round(max(gl_OXYGEN_HEATING_LIST), 2)
-                            png_pressure = round(max(gl_PNG_PRESSURE_LIST), 2)
+                            da_pressure = 1.5  # round(max(gl_DAACETYLENE_PRESSURE_LIST), 2)
+                            o2_gas_pressure = sum(gl_OXYGEN_HEATING_LIST) // len(
+                                gl_OXYGEN_HEATING_LIST)  # round(min(gl_OXYGEN_HEATING_LIST), 2)
+                            png_pressure = round(min(gl_PNG_PRESSURE_LIST), 1)
                             time_ = datetime.now().isoformat()
                             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                             if priority_serial_number:
@@ -316,8 +385,8 @@ def main():
                                 "machine": GL_MACHINE_NAME,
                                 "shift": shift,
                                 "py_ok": PY_OK,
-                                "ihf_temperature": spg_temp,
-                                "ihf_entering": ihf_entering,
+                                "ihf_temperature": ihf_entering,
+                                "ihf_entering": spg_temp,
                                 "spindle_speed": spindle_speed,
                                 "spindle_feed": spindle_feed,
                                 "da_gas_pressure": da_pressure,
@@ -326,14 +395,14 @@ def main():
                                 "png_pressure": png_pressure
                             }
 
-                            ob_db.save_running_data(Ser_Num, spg_temp, ihf_entering, o2_gas_pressure,
+                            ob_db.save_running_data(Ser_Num, ihf_entering, spg_temp, o2_gas_pressure,
                                                     png_pressure,
                                                     air_pressure, da_pressure, spindle_speed, spindle_feed)
                             post_data(DATA)
                             ob_db.delete_serial_number(Ser_Num)
                             ob_db.delete_priority_serial(Ser_Num)
+                            gl_IHF_ENTERING_LIST = []
                             gl_IHF_HEATING_LIST = []
-                            gl_SPG_HEATING_LIST = []
                             gl_OXYGEN_HEATING_LIST = []
                             gl_PNG_PRESSURE_LIST = []
                             gl_AIR_PRESSURE_LIST = []
@@ -358,8 +427,9 @@ def check_threads(futures, executor):
 def main_executor():
     with ThreadPoolExecutor() as executor:
         futures = []
-        futures.append(executor.submit(thread_target, ADD_QUEUE_NAME, ADD_QUEUE_NAME1))
+        futures.append(executor.submit(thread_target))
         futures.append(executor.submit(main))
+        logger.info(f'tast to submit is {futures}')
         while True:
             check_threads(futures, executor)
             time.sleep(5)

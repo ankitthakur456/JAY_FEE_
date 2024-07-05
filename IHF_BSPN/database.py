@@ -39,7 +39,7 @@ class DBHelper:
                     )""")
 
     # region queue functions
-    def enqueue_serial_number(self, serial_number):
+    def enqueue_serial_number(self, serial_number: str):
         try:
             self.cursor.execute("""SELECT serial_number FROM queue where serial_number = ?""", (serial_number,))
             if self.cursor.fetchone() is None:
@@ -52,7 +52,7 @@ class DBHelper:
         except Exception as e:
             logger.error(f"[-] Failed to enqueue serial number Error {e}")
 
-    def enqueue_priority_serial(self, serial_number):
+    def enqueue_priority_serial(self, serial_number: str):
         try:
             self.cursor.execute("""SELECT serial_number FROM priority_queue where serial_number = ?""",
                                 (serial_number,))
@@ -78,7 +78,7 @@ class DBHelper:
             logger.error(f"[-] Failed to get first serial number Error {e}")
             return None
 
-    def delete_priority_serial(self, serial_number):
+    def delete_priority_serial(self, serial_number: str):
         try:
             self.cursor.execute("""DELETE FROM priority_queue where serial_number =?""", (serial_number,))
             self.connection.commit()
@@ -98,7 +98,7 @@ class DBHelper:
             logger.error(f"[-] Failed to get first serial number Error {e}")
             return None
 
-    def delete_serial_number(self, serial_number):
+    def delete_serial_number(self, serial_number: str):
         try:
             self.cursor.execute("""DELETE FROM queue where serial_number =?""", (serial_number,))
             self.connection.commit()

@@ -15,7 +15,7 @@ import struct
 from conversions import get_shift
 from dotenv import load_dotenv
 from statistics import mean
-
+import socket
 # Load the .env file
 load_dotenv()
 
@@ -30,13 +30,13 @@ logger = logging.getLogger('JayFee_log')
 # end region
 
 GL_MACHINE_INFO = {
-    'SPG-3': {
+    'BS-2': {
         'py_ok': True,
         'ip': '192.168.0.107',
         'stage': 'IHF_BSPN-2',
-        'line': 'Line 1',
+        'line': 'Line 2',
     },
-    'SPG-4': {
+    'N': {
         'py_ok': True,
         'ip': '192.168.0.107',
         'stage': 'IHF_NSPN-2',
@@ -63,8 +63,8 @@ HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
 FL_STATUS = False
-gl_IHF_HEATING_LIST = []
-gl_SPG_HEATING_LIST = []
+gl_IHF_ENTERING_LIST = []
+gl_IHF_TEMP_LIST = []
 gl_OXYGEN_HEATING_LIST = []
 gl_PNG_PRESSURE_LIST = []
 gl_AIR_PRESSURE_LIST = []
@@ -158,38 +158,89 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    def queue1_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 1: %r" % body)
+def is_connected():
+    """ Check if the internet connection is available. """
+    try:
+        # Try to connect to a common DNS server (Google's public DNS)
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        return True
+    except OSError:
+        return False
+
+
+async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+    connection = None
+    while True:
+        if is_connected():
+            try:
+                logger.info("Internet connection is available. Attempting to connect...")
+                credentials = pika.PlainCredentials(username, password)
+                parameters = pika.ConnectionParameters(host, port, '/', credentials)
+
+                connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open,
+                                                   on_close_callback=on_close)
+                connection.ioloop.start()
+
+            except pika.exceptions.AMQPConnectionError as e:
+                logger.error(f'AMQP Connection Error: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            except Exception as e:
+                logger.error(f'General Exception in receive_message: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            finally:
+                if connection and connection.is_open:
+                    connection.close()
+        else:
+            logger.error("Internet connection is down. Waiting for reconnection...")
+            while not is_connected():
+                await asyncio.sleep(5)  # Check every 5 seconds for reconnection
+
+        logger.info("Reconnecting after a brief pause...")
+        await asyncio.sleep(5)  # Optional delay to prevent too frequent retries
+
+
+def on_open(connection):
+    logger.info("Connection opened.")
+    connection.channel(on_open_callback=on_channel_open)
+
+
+def on_channel_open(channel):
+    logger.info("Channel opened.")
+    channel.basic_consume(ADD_QUEUE_NAME, queue1_callback, auto_ack=True)
+    channel.basic_consume(ADD_QUEUE_NAME1, queue2_callback, auto_ack=True)
+
+
+def on_close(connection, reason):
+    logger.info(f"Connection closed: {reason}")
+    connection.ioloop.stop()
+
+
+def queue1_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 1: {body}")
+    if body:
         ob_db.enqueue_serial_number(body.decode('utf-8'))
 
-    def queue2_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 2: %r" % body)
+
+def queue2_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 2: {body}")
+    if body:
         ob_db.enqueue_priority_serial(body.decode('utf-8'))
 
-    def on_open(connection):
-        connection.channel(on_open_callback=on_channel_open)
 
-    def on_channel_open(channel):
-        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
-        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
-
+async def receive():
     try:
-        credentials = pika.PlainCredentials(username, password)
-        parameters = pika.ConnectionParameters(host, port, '/', credentials)
-        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
-        connection.ioloop.start()
+        while True:
+            await receive_message()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.error('Interrupted')
     except Exception as e:
-        logger.error(f'Exception in receive_message: {e}')
-        time.sleep(5)  # Retry after 5 seconds
+        logger.error(f'Exception in main: {e}')
 
 
-def thread_target(queue_name1, queue_name2):
-    while True:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(receive_message(queue_name1, queue_name2))
-        time.sleep(0.5)
+def thread_target():
+    asyncio.run(receive())
+
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -218,52 +269,64 @@ def post_data(DATA):
 def post_sync_data():
     data = ob_db.get_sync_data()
     if data:
-        try:
-            for value in data:
-                payload = json.loads(value[0])
-                logging.info(f"Payload to send sync {payload}")
-                sync_req = requests.post(API, json=payload, headers=HEADERS, timeout=5)
-                sync_req.raise_for_status()
-                logging.info(f"payload send from sync data : {sync_req.status_code}")
+        data_list = [json.loads(item[0]) for item in data]
 
-        except Exception as e:
-            logging.info(f"[-] Error in sending SYNC data {e}")
-        else:
-            ob_db.delete_sync_data()
+        # Format each payload
+        def format_payload(payload):
+            if isinstance(payload['serial_number'], str):
+                payload['serial_number'] = str(payload['serial_number'])
+            if isinstance(payload['time_'], str):
+                payload['time_'] = str(payload['time_'])
+            if isinstance(payload['date_'], str):
+                payload['date_'] = str(payload['date_'])
+            return payload
+
+        formatted_data_list = [format_payload(data) for data in data_list]
+        for payload in formatted_data_list:
+            response = requests.post(API, json=payload, headers=HEADERS, timeout=5)
+
+            if response.status_code == 200:
+                logger.info(f"Data sent successfully: {payload}")
+                ob_db.delete_sync_data()
+            else:
+                logger.info(f"Error {response.status_code}: {response.text}")
+
     else:
-        logging.info(f"Synced data is empty")
+        logger.info(f"Synced data is empty")
 
 
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
+    global FL_STATUS, PREV_FL_STATUS, gl_IHF_TEMP_LIST, gl_IHF_ENTERING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
     while True:
         ob_db = DBHelper()
         try:
             data = Reading_data()
             status = reading_status()
+            post_sync_data()
             logging.info(f'status from plc is {status}')
-            ihf_heating = float_conversion([data[2], data[3]])
-            logger.info(f'spg_heating_ is {ihf_heating}')
-            spg_heating = float_conversion([data[0], data[1]])
-            logger.info(f'ihf_heating_ is {spg_heating}')
+            ihf_entering = float_conversion([data[2], data[3]])
+            logger.info(f'ihf_temp_ is {ihf_entering}')
+            ihf_temp = float_conversion([data[0], data[1]])
+            logger.info(f'ihf_entering_ is {ihf_temp}')
             oxygen_heating = float_conversion([data[4], data[5]])
             logger.info(f'oxygen_heating_ is {oxygen_heating}')
             png_pressure = float_conversion([data[6], data[7]])
             logger.info(f'png_pressure_ is {png_pressure}')
             air_pressure = float_conversion([data[8], data[9]])
             logger.info(f'air_pressure_ is {air_pressure}')
-            DA_pressure = 4  # float_conversion([data[10], data[11]])
+            DA_pressure = 1.5  # float_conversion([data[10], data[11]])
             logger.info(f'DA_pressure_ is {DA_pressure}')
-            if spg_heating > 700:
-                gl_SPG_HEATING_LIST.append(spg_heating)
-            if ihf_heating >= 750:
+            if ihf_temp >= 750:
+                gl_IHF_TEMP_LIST.append(ihf_temp)
+            if ihf_entering > 750:
                 FL_STATUS = True
                 logger.info(f'cycle running')
-            elif ihf_heating <= 750:
+            elif ihf_entering <= 750:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
             if FL_STATUS:
-                gl_IHF_HEATING_LIST.append(ihf_heating)
+                if ihf_entering < 1000:
+                    gl_IHF_ENTERING_LIST.append(ihf_entering)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_AIR_PRESSURE_LIST.append(air_pressure)
@@ -281,16 +344,17 @@ def main():
                         logging.info(f'serial number is {serial_number}')
                         shift = get_shift()
                         if priority_serial_number or serial_number:
-                            logging.info(f'ihf heating list {gl_IHF_HEATING_LIST}')
-                            logger.info(f'spg heating list {gl_SPG_HEATING_LIST}')
-                            ihf_entering = round(max(gl_IHF_HEATING_LIST), 2)
-                            spg_temp = round(max(gl_SPG_HEATING_LIST), 2)
+                            logging.info(f'ihf heating list {gl_IHF_ENTERING_LIST}')
+                            logger.info(f'spg heating list {gl_IHF_TEMP_LIST}')
+                            logger.info(f'png pressure list {gl_PNG_PRESSURE_LIST}')
+                            ihf_entering = round(max(gl_IHF_ENTERING_LIST), 2)
+                            spg_temp = round(max(gl_IHF_TEMP_LIST), 2)
                             air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
                             spindle_speed = 150
                             spindle_feed = 300
                             da_pressure = round(max(gl_DAACETYLENE_PRESSURE_LIST), 2)
-                            o2_gas_pressure = round(max(gl_OXYGEN_HEATING_LIST), 2)
-                            png_pressure = round(max(gl_PNG_PRESSURE_LIST), 2)
+                            o2_gas_pressure = sum(gl_OXYGEN_HEATING_LIST) // len(gl_OXYGEN_HEATING_LIST)
+                            png_pressure = round(min(gl_PNG_PRESSURE_LIST),2)
                             time_ = datetime.now().isoformat()
                             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                             if priority_serial_number:
@@ -321,8 +385,8 @@ def main():
                             post_data(DATA)
                             ob_db.delete_serial_number(Ser_Num)
                             ob_db.delete_priority_serial(Ser_Num)
-                            gl_IHF_HEATING_LIST = []
-                            gl_SPG_HEATING_LIST = []
+                            gl_IHF_ENTERING_LIST = []
+                            gl_IHF_TEMP_LIST = []
                             gl_OXYGEN_HEATING_LIST = []
                             gl_PNG_PRESSURE_LIST = []
                             gl_AIR_PRESSURE_LIST = []
@@ -334,7 +398,6 @@ def main():
             time.sleep(0.5)
         except Exception as err:
             logger.error(f'error in executing main {err}')
-
 
 
 def check_threads(futures, executor):
@@ -360,4 +423,3 @@ if __name__ == '__main__':
         main_executor()
     except KeyboardInterrupt:
         logger.error('Interrupted')
-

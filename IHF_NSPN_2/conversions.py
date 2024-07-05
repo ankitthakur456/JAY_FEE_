@@ -28,5 +28,3 @@ def get_shift():
         # here returning C because we are not handling 0.001 microsecond in case of c shift that will return
         # None otherwise
         return 'B'
-
-

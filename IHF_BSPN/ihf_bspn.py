@@ -4,13 +4,11 @@ from pyModbusTCP.client import ModbusClient
 import requests
 from database import DBHelper
 import time
-from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 import json
 import os
-from typing import TypedDict, Union, Optional
 import logging.config
 import logging.handlers
 from datetime import datetime, timedelta
@@ -46,7 +44,7 @@ GL_MACHINE_INFO = {
         'line': 'Line 1',
     }
 }
-
+machine_name = 'BS-1'
 HOST = os.getenv('HOST')
 PASSWORD = os.getenv('PASSWORD')
 PORT = os.getenv('PORT')
@@ -55,7 +53,8 @@ USERNAME_ = os.getenv("USERNAME_")
 # ADD_QUEUE_NAMES = os.getenv('ADD_QUEUE_NAMES')
 ADD_QUEUE_NAME = 'add_srl_100_1'
 ADD_QUEUE_NAME1 = 'priority_add_srl_100_1'
-
+PREV_SHIFT = None
+PREV_VALUE = False
 DEL_SERIAL_NUMBER = os.getenv('DEL_SERIAL_NUMBER')
 SEND_ACK_ADDING = os.getenv('SEND_ACK_ADDING')
 SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
@@ -72,6 +71,13 @@ gl_OXYGEN_HEATING_LIST = []
 gl_PNG_PRESSURE_LIST = []
 gl_AIR_PRESSURE_LIST = []
 gl_DAACETYLENE_PRESSURE_LIST = []
+PREV_BREAK_STATUS = False
+BREAK_STATUS = False
+PREV_VALUE = False
+TIME_STATUS = False
+BREAK_CHECK = False
+PREV_BREAK_CHECK = False
+transition_time = time.time()
 ob_db = DBHelper()
 
 
@@ -244,14 +250,6 @@ def thread_target():
     asyncio.run(receive())
 
 
-# def thread_target(queue_name1: str, queue_name2: str):
-#     loop = asyncio.new_event_loop()
-#     asyncio.set_event_loop(loop)
-#     loop.run_until_complete(receive_message(queue_name1, queue_name2))
-#     loop.run_forever()
-#     time.sleep(0.5)
-
-
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
     credentials = pika.PlainCredentials(username, password)
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port, credentials=credentials))
@@ -305,13 +303,17 @@ def post_sync_data():
 
 
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_IHF_HEATING_LIST, gl_IHF_ENTERING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num
+    global FL_STATUS, PREV_FL_STATUS, gl_IHF_HEATING_LIST, gl_IHF_ENTERING_LIST, gl_OXYGEN_HEATING_LIST, \
+        gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num, PREV_VALUE, PREV_BREAK_STATUS, BREAK_STATUS, transition_time, BREAK_CHECK, PREV_BREAK_CHECK, PREV_SHIFT
     while True:
         ob_db = DBHelper()
         try:
             data = Reading_data()
             status = reading_status()
             post_sync_data()
+            shift = get_shift()
+            date = (datetime.now() - timedelta(hours=7)).strftime("%F")
+            ob_db.addBreakDuration(machine_name)
             logger.info(f'status from plc is {status}')
             ihf_entering = float_conversion([data[2], data[3]])
             logger.info(f'ihf_entering_ is {ihf_entering}')
@@ -335,8 +337,8 @@ def main():
                 logger.info(f'[++++++start time++++++++]{datetime.now().time()}')
             elif ihf_heating < 700:
                 FL_STATUS = False
+                BREAK_CHECK = True
                 logger.info(f'cycle stopped')
-                logger.info(f'[++++++stop time++++++++]{datetime.now().time()}')
             if FL_STATUS:
                 if ihf_heating < 1000:
                     gl_IHF_HEATING_LIST.append(ihf_heating)
@@ -344,7 +346,19 @@ def main():
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_AIR_PRESSURE_LIST.append(air_pressure)
                 gl_DAACETYLENE_PRESSURE_LIST.append(round(abs(DA_pressure), 2))
-
+            current_value = FL_STATUS
+            # Check for transition from 0 to 1
+            if PREV_VALUE == True and current_value == False:
+                transition_time = time.time()  # Calculate elapsed time
+            PREV_VALUE = current_value
+            if PREV_BREAK_CHECK != BREAK_CHECK and not FL_STATUS and (time.time() - transition_time) > 270:
+                ob_db.addBreakStart(machine_name, date, shift, True)
+                logging.info('[+] Breakstart data added to addBreakStart')
+                BREAK_STATUS = True
+                PREV_BREAK_CHECK = BREAK_CHECK
+            if FL_STATUS and BREAK_STATUS != PREV_BREAK_STATUS:
+                ob_db.addBreakStop(machine_name)
+                PREV_BREAK_STATUS = BREAK_STATUS
             if FL_STATUS != PREV_FL_STATUS:
                 try:
                     if FL_STATUS:
@@ -355,13 +369,16 @@ def main():
                         serial_number = ob_db.get_first_serial_number()
                         # asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
                         logger.info(f'serial number is {serial_number}')
-                        shift = get_shift()
+
+                        if shift != PREV_SHIFT:
+                            print('post')
+                            PREV_SHIFT = shift
                         if priority_serial_number or serial_number:
                             # logger.info(f'ihf heating list {gl_IHF_ENTERING_LIST}')
                             # logger.info(f'spg heating list {gl_IHF_HEATING_LIST}')
-                            logger.info(
-                                f'gl_OXYGEN_HEATING_LIST {gl_OXYGEN_HEATING_LIST} and spg heating at that time is {gl_IHF_ENTERING_LIST}')
-                            # logger.info(f' gl_PNG_PRESSURE_LIST list {gl_PNG_PRESSURE_LIST}')
+                            #logger.info(
+                                #f'gl_OXYGEN_HEATING_LIST {gl_OXYGEN_HEATING_LIST} and spg heating at that time is {gl_IHF_ENTERING_LIST}')
+                            logger.info(f' gl_PNG_PRESSURE_LIST list {gl_PNG_PRESSURE_LIST}')
                             ihf_entering = round(max(gl_IHF_ENTERING_LIST), 2)
                             spg_temp = round(max(gl_IHF_HEATING_LIST), 2)
                             air_pressure = round(max(gl_AIR_PRESSURE_LIST), 2)
@@ -372,7 +389,7 @@ def main():
                                 gl_OXYGEN_HEATING_LIST)  # round(min(gl_OXYGEN_HEATING_LIST), 2)
                             png_pressure = round(min(gl_PNG_PRESSURE_LIST), 1)
                             time_ = datetime.now().isoformat()
-                            date = (datetime.now() - timedelta(hours=7)).strftime("%F")
+
                             if priority_serial_number:
                                 Ser_Num = priority_serial_number
                             else:
@@ -421,7 +438,8 @@ def check_threads(futures, executor):
         if future.done() or future.exception():
             logger.info("Thread completed or raised an exception")
             futures.remove(future)
-            futures.append(executor.submit(thread_target, ADD_QUEUE_NAME, ADD_QUEUE_NAME1))
+            futures.append(executor.submit(thread_target))
+            futures.append(executor.submit(main))
 
 
 def main_executor():
@@ -432,7 +450,7 @@ def main_executor():
         logger.info(f'tast to submit is {futures}')
         while True:
             check_threads(futures, executor)
-            time.sleep(5)
+            time.sleep(1.5)
 
 
 if __name__ == '__main__':

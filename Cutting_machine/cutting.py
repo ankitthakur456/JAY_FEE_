@@ -38,6 +38,8 @@ PREV_SHIFT = 'A'
 HEADERS = {"Content-Type": "application/json"}
 STATUS = False
 SENT_FLAG = False
+
+
 # DATA GATHERING
 
 def init_conf():
@@ -116,19 +118,23 @@ if __name__ == '__main__':
             data = Reading_data()
             logging.info(f'data from plc is {data}')
             shift = get_shift()
+            logger.info(f'shift is {shift}')
             if not SENT_FLAG and data[1]:
                 payload = {'status': 'on', 'shift': shift}
                 post_data(payload)
+                logger.info(f'payload is {payload}')
                 SENT_FLAG = True
                 time.sleep(2)
                 STATUS = False
             if not data[1] and SENT_FLAG:
                 payload = {'status': 'off', 'shift': shift}
                 post_data(payload)
+                logger.info(f'payload is {payload}')
                 SENT_FLAG = False
             if shift != PREV_SHIFT:
                 payload1 = {'shift': shift}
                 post_data(payload1)
+                logger.info(f'payload is {payload}')
                 PREV_SHIFT = shift
 
     except KeyboardInterrupt:

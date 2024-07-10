@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import struct
 from conversions import get_shift
 from dotenv import load_dotenv
+import socket
 
 # Load the .env file
 load_dotenv()
@@ -29,7 +30,7 @@ logger = logging.getLogger('JayFee_log')
 # end region
 
 GL_MACHINE_INFO = {
-    'SPG-1': {
+    'NS-1': {
         'py_ok': True,
         'ip': '192.168.0.1',
         'stage': 'IHF_BSPN',
@@ -157,37 +158,88 @@ def float_conversion(registers):
     return result
 
 
-async def receive_message(queue_name1, queue_name2, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
-    def queue1_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 1: %r" % body)
+def is_connected():
+    """ Check if the internet connection is available. """
+    try:
+        # Try to connect to a common DNS server (Google's public DNS)
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        return True
+    except OSError:
+        return False
+
+
+async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
+    connection = None
+    while True:
+        if is_connected():
+            try:
+                logger.info("Internet connection is available. Attempting to connect...")
+                credentials = pika.PlainCredentials(username, password)
+                parameters = pika.ConnectionParameters(host, port, '/', credentials)
+
+                connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open,
+                                                   on_close_callback=on_close)
+                connection.ioloop.start()
+
+            except pika.exceptions.AMQPConnectionError as e:
+                logger.error(f'AMQP Connection Error: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            except Exception as e:
+                logger.error(f'General Exception in receive_message: {e}')
+                await asyncio.sleep(5)  # Wait before retrying
+            finally:
+                if connection and connection.is_open:
+                    connection.close()
+        else:
+            logger.error("Internet connection is down. Waiting for reconnection...")
+            while not is_connected():
+                await asyncio.sleep(5)  # Check every 5 seconds for reconnection
+
+        logger.info("Reconnecting after a brief pause...")
+        await asyncio.sleep(5)  # Optional delay to prevent too frequent retries
+
+
+def on_open(connection):
+    logger.info("Connection opened.")
+    connection.channel(on_open_callback=on_channel_open)
+
+
+def on_channel_open(channel):
+    logger.info("Channel opened.")
+    channel.basic_consume(ADD_SERIAL_NUMBER, queue1_callback, auto_ack=True)
+    channel.basic_consume(ADD_SERIAL_NUMBER1, queue2_callback, auto_ack=True)
+
+
+def on_close(connection, reason):
+    logger.info(f"Connection closed: {reason}")
+    connection.ioloop.stop()
+
+
+def queue1_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 1: {body}")
+    if body:
         ob_db.enqueue_serial_number(body.decode('utf-8'))
 
-    def queue2_callback(ch, method, properties, body):
-        logging.info(" [x] Received queue 2: %r" % body)
+
+def queue2_callback(ch, method, properties, body):
+    logger.info(f" [x] Received queue 2: {body}")
+    if body:
         ob_db.enqueue_priority_serial(body.decode('utf-8'))
 
-    def on_open(connection):
-        connection.channel(on_open_callback=on_channel_open)
 
-    def on_channel_open(channel):
-        channel.basic_consume(queue_name1, queue1_callback, auto_ack=True)
-        channel.basic_consume(queue_name2, queue2_callback, auto_ack=True)
-
-    while True:
-        credentials = pika.PlainCredentials(username, password)
-        parameters = pika.ConnectionParameters(host, port, '/', credentials)
-        connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open)
-        try:
-            connection.ioloop.start()
-        except KeyboardInterrupt:
-            connection.close()
-            connection.ioloop.start()
+async def receive():
+    try:
+        while True:
+            await receive_message()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.error('Interrupted')
+    except Exception as e:
+        logger.error(f'Exception in main: {e}')
 
 
-def thread_target(queue_name1, queue_name2):
-    while True:
-        asyncio.run(receive_message(queue_name1, queue_name2))
-        time.sleep(0.5)
+def thread_target():
+    asyncio.run(receive())
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -262,16 +314,18 @@ def main():
             logger.info(f'png_pressure_ is {png_pressure}')
             da_gas_pressure = round(float_conversion([data[8], data[9]]), 2)
             logger.info(f'da_gas_pressure is {da_gas_pressure}')
-            if status[1] >= 10:
+
+            if ihf_heating > 750:
+                gl_IHF_HEATING_LIST.append(ihf_heating)
+            if spg_heating > 750:
                 FL_STATUS = True
                 logger.info(f'cycle running')
-            elif status[1] == 0:
+            elif spg_heating < 750:
                 FL_STATUS = False
                 logger.info(f'cycle stopped')
-            if spg_heating > 750:
-                gl_SPG_HEATING_LIST.append(spg_heating)
             if FL_STATUS:
-                gl_IHF_HEATING_LIST.append(ihf_heating)
+                if spg_heating < 1000:
+                    gl_SPG_HEATING_LIST.append(spg_heating)
                 gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
                 gl_PNG_PRESSURE_LIST.append(png_pressure)
                 gl_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
@@ -303,8 +357,8 @@ def main():
                                 ihf_entering = 0
                             spindle_speed = 150
                             spindle_feed = 300
-                            o2_gas_pressure = max(gl_OXYGEN_HEATING_LIST)
-                            png_pressure = max(gl_PNG_PRESSURE_LIST)
+                            o2_gas_pressure = sum(gl_OXYGEN_HEATING_LIST) // len(gl_OXYGEN_HEATING_LIST)
+                            png_pressure = min(gl_PNG_PRESSURE_LIST)
                             da_gas_pressure = max(gl_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()
@@ -351,24 +405,24 @@ def main():
             logger.error(f'error in executing main {err}')
 
 
-def check_threads(futures):
+def check_threads(futures, executor):
     for future in futures:
         if future.done() or future.exception():
             logger.info("Thread completed or raised an exception")
-            # Trigger the receive_message function
-            asyncio.run(receive_message(ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
+            futures.remove(future)
+            futures.append(executor.submit(thread_target))
+            futures.append(executor.submit(main))
 
 
 def main_executor():
     with ThreadPoolExecutor() as executor:
         futures = []
-        futures.append(executor.submit(thread_target, ADD_SERIAL_NUMBER, ADD_SERIAL_NUMBER1))
+        futures.append(executor.submit(thread_target))
         futures.append(executor.submit(main))
-
-        # Monitor the threads periodically
+        logger.info(f'tast to submit is {futures}')
         while True:
-            check_threads(futures)
-            time.sleep(0.5)  # Adjust the interval as needed
+            check_threads(futures, executor)
+            time.sleep(5)
 
 
 if __name__ == '__main__':

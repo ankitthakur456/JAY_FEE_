@@ -40,7 +40,7 @@ GL_MACHINE_INFO = {
     },
     'HQT-2': {
         'py_ok': True,
-        'ip': "192.168.0.152",
+        'ip': "192.168.0.165",
         'stage': 'HQT-2',
         'line': 'Line 2',
     }
@@ -186,7 +186,7 @@ def get_machine_data():
 
 def reading_status():
     try:
-        c = ModbusClient(host='192.168.0.152', port=510, unit_id=1, auto_open=True)
+        c = ModbusClient(host='192.168.0.165', port=510, unit_id=1, auto_open=True)
         regs = c.read_discrete_inputs(0, 2)
         return regs
     except Exception as err:
@@ -297,17 +297,17 @@ def main():
                         "machine": GL_MACHINE_NAME,
                         "shift": shift,
                         "py_ok": PY_OK,
-                        "hardening_temp_control_1": 840,
-                        "hardening_temp_control_2": 840,
-                        "hardening_temp_control_3": 840,
-                        "hardening_temp_control_4": 840,
-                        "tempering_temp_control_1": 540,
-                        "tempering_temp_control_2": 540,
-                        "tempering_temp_control_3": 540,
-                        "tempering_temp_control_4": 540,
-                        "tempering_temp_control_5": 540,
-                        "tempering_temp_control_6": 540,
-                        "quenching_tank_temp_control": 40
+                        "hardening_temp_control_1": gl_HARDING_TEMP_1,
+                        "hardening_temp_control_2": gl_HARDING_TEMP_2,
+                        "hardening_temp_control_3": gl_HARDING_TEMP_3,
+                        "hardening_temp_control_4": gl_HARDING_TEMP_4,
+                        "tempering_temp_control_1": gl_TEMPERING_TEMP_1,
+                        "tempering_temp_control_2": gl_TEMPERING_TEMP_2,
+                        "tempering_temp_control_3": gl_TEMPERING_TEMP_3,
+                        "tempering_temp_control_4": gl_TEMPERING_TEMP_4,
+                        "tempering_temp_control_5": gl_TEMPERING_TEMP_5,
+                        "tempering_temp_control_6": gl_TEMPERING_TEMP_6,
+                        "quenching_tank_temp_control": gl_QUENCHING_TANK_TEMP_CONTROL
                     }
 
                     ob_db.save_running_data(serial_number, gl_HARDING_TEMP_1, gl_HARDING_TEMP_2, gl_HARDING_TEMP_3,

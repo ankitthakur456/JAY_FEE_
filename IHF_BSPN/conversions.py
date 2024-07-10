@@ -28,3 +28,36 @@ def get_shift():
         # here returning C because we are not handling 0.001 microsecond in case of c shift that will return
         # None otherwise
         return 'B'
+def break_check(current_shift):
+    planned_break_dict = {
+        #
+            "A": {
+                # "moving_1": [datetime.datetime.now().replace(hour=6, minute=30), 5],
+                "tea_1": [datetime.datetime.now().replace(hour=9, minute=10), 10],
+                "lunch": [datetime.datetime.now().replace(hour=11, minute=0), 30],
+                "tea_2": [datetime.datetime.now().replace(hour=12, minute=20), 10],
+                # "moving_2": [datetime.datetime.now().replace(hour=14, minute=40), 20],
+            },
+            "B": {
+                # "moving_1": [datetime.datetime.now().replace(hour=15, minute=0), 5],
+                "tea_1": [datetime.datetime.now().replace(hour=16, minute=10), 10],
+                "lunch": [datetime.datetime.now().replace(hour=19, minute=0), 30],
+                "tea_2": [datetime.datetime.now().replace(hour=20, minute=20), 10],
+                # "moving_2": [datetime.datetime.now().replace(hour=23, minute=10), 20],
+            },
+            "C": {
+                # "moving_1": [datetime.datetime.now().replace(hour=23, minute=30), 5],
+                "tea_1": [datetime.datetime.now().replace(hour=23, minute=10), 10],
+                "tea_2": [datetime.datetime.now().replace(hour=2, minute=10), 10],
+                "tea_3": [datetime.datetime.now().replace(hour=4, minute=10), 10],
+                # "moving_2": [datetime.datetime.now().replace(hour=6, minute=10), 20]
+            },
+        }
+   # }
+    current_time = datetime.datetime.now()
+    break_time_dict = planned_break_dict[current_shift]
+
+    for key, [planned_break, minutes] in break_time_dict.items():
+        if(current_time - planned_break).total_seconds() < minutes * 60 and current_time > planned_break:
+            return True
+    return False

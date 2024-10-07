@@ -1,3 +1,4 @@
+import datetime
 import sqlite3
 import time
 import logging
@@ -5,6 +6,8 @@ import ast
 import json
 
 logger = logging.getLogger('JayFee_log')
+
+
 class DBHelper:
     def __init__(self):
         self.connection = sqlite3.connect("JAYFEE.db", check_same_thread=False)
@@ -29,6 +32,11 @@ class DBHelper:
                             OXYGEN_HEATING REAL,
                             PNG_PRESSURE REAL,
                             serial_number TEXT)""")
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS breakdownData(breakId INTEGER NOT NULL,date_ DATE NOT NULL,
+                                        shift VARCHAR(1) NOT NULL,
+                                        time_ DATETIME, machine VARCHAR(20) NOT NULL, startTime DATETIME NOT NULL, stopTime DATETIME,
+                                        duration INTEGER,
+                                        PRIMARY KEY (breakId AUTOINCREMENT))''')  # BreakdownData table
 
     def enqueue_serial_number(self, serial_number):
         try:
@@ -76,6 +84,7 @@ class DBHelper:
             logger.info(f"[+] Successful, Serial Number Deleted from the database")
         except Exception as e:
             logger.error(f"[-] Failed to delete serial number Error {e}")
+
     # region queue functions
 
     def enqueue_serial_number(self, serial_number):
@@ -126,21 +135,21 @@ class DBHelper:
                 timestamp = ?, ihf_heating = ?, spg_heating = ?, oxygen_heating = ?,
                 png_pressure = ?
                 WHERE serial_number = ?""",
-                                    (time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE, serial_number))
+                                    (
+                                        time.time(), IHF_HEATING, SPG_HEATING, OXYGEN_HEATING, PNG_PRESSURE,
+                                        serial_number))
             else:
                 self.cursor.execute("""INSERT INTO running_data(timestamp, serial_number,
                 ihf_heating, spg_heating, oxygen_heating, png_pressure)
                 VALUES(?,?,?,?,?,?)""",
                                     (time.time(), serial_number, IHF_HEATING, SPG_HEATING, OXYGEN_HEATING,
-                                     PNG_PRESSURE ))
+                                     PNG_PRESSURE))
             self.connection.commit()
             logger.info(f"[+] Successful, Running Data Saved to the database")
         except Exception as error:
             logger.error(f"[-] Failed to save running data. Error: {error}")
 
-    #endregion
-
-    #region Sync data TB database
+    # region Sync data TB database
     def add_sync_data(self, payload):
         try:
             self.cursor.execute("""SELECT * FROM sync_data
@@ -183,3 +192,208 @@ class DBHelper:
             logger.info(f"Successful, Deleted from sync_data database")
         except Exception as e:
             logger.info(f'Error in clear_sync_data {e} No sync Data to clear')
+
+    # BREAKDOWN DATA HANDLING
+    def addBreakDuration(self, mc_name):
+        try:
+            time_ = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute(
+                '''SELECT startTime,breakId FROM breakdownData WHERE stopTime IS NULL AND machine=?''',
+                (mc_name,))
+            startList = self.cursor.fetchall()
+            logger.debug(startList)
+            for items in startList:
+                startTime = items[0]
+                breakId = items[1]
+                duration = (datetime.datetime.now() - datetime.datetime.strptime(startTime,
+                                                                                 "%Y-%m-%d %H:%M:%S")).seconds
+                self.cursor.execute('''UPDATE breakdownData SET time_=?,duration=?
+                                   WHERE stopTime is NULL AND breakId=?''', (time_, duration, breakId))
+            self.connection.commit()
+            # self.cursor.execute('''DELETE FROM breakdownData WHERE duration<60 AND NOT stopTime is NULL''')
+            # self.connection.commit()
+            logger.debug('Successful' + 'Breakdown duration updated successfully in the database.')
+        except Exception as e:
+            logger.error('Error ' + str(e) + ' Could not add Breakdown duration to the database.')
+
+    def addBreakStop(self, mc_name):
+        try:
+            time_ = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute(
+                '''SELECT startTime,breakId FROM breakdownData WHERE stopTime IS NULL and machine = ?''',
+                (mc_name,))
+            startList = self.cursor.fetchall()
+            logger.debug(startList)
+            for items in startList:
+                startTime = items[0]
+                breakId = items[1]
+                if datetime.datetime.now() > datetime.datetime.strptime(startTime, "%Y-%m-%d %H:%M:%S"):
+                    duration = (datetime.datetime.now() - datetime.datetime.strptime(startTime,
+                                                                                     "%Y-%m-%d %H:%M:%S")).seconds
+                    self.cursor.execute('''UPDATE breakdownData SET time_=?, stopTime=?,duration=?
+                                       WHERE stopTime is NULL AND breakId=?''', (time_, time_, duration, breakId))
+                else:
+                    stop_time = datetime.datetime.strptime(startTime, "%Y-%m-%d %H:%M:%S") + datetime.timedelta(
+                        seconds=10)
+                    self.cursor.execute('''UPDATE breakdownData SET time_=?, stopTime=?,duration=?
+                                       WHERE stopTime is NULL AND breakId=?''',
+                                        (time_, stop_time, 10, breakId))
+            self.connection.commit()
+            logger.info(f'Successful: Breakdown is stopped successfully in the database for {mc_name}')
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not stop Breakdown in the database for {mc_name}')
+
+    def addBreakStart(self, mc_name, prevD, prevS, break_status):
+        try:
+            self.addBreakStop(mc_name)
+            time_ = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if break_status:
+                self.cursor.execute("INSERT INTO breakdownData(date_,shift, time_, startTime, machine)"
+                                    "VALUES (?,?,?,?,?)", (prevD, prevS, time_, time_, mc_name))
+                self.connection.commit()
+                logger.info(f'Successful: Breakdown is added successfully to the database for {mc_name}')
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not add break down to the database for {mc_name}')
+
+    def get_break_duration(self, mc_name, prevD, prevS):
+        try:
+            self.cursor.execute('''SELECT SUM(duration) FROM breakdownData
+                              WHERE machine=? AND date_=? AND shift=? GROUP BY shift''', (mc_name, prevD, prevS))
+            try:
+                b_time = self.cursor.fetchone()
+            except:
+                b_time = [0]
+            # logger.info(b_time)
+            # logger.info(type(b_time))
+            if b_time is None:
+                return 0
+            if type(b_time) is tuple:
+                return b_time[0]
+            else:
+                return 0
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not get daily breakdown for {mc_name}')
+            return 0
+
+    def get_current_breakdown_duration(self, mc_name, prevD, prevS):
+        try:
+            self.cursor.execute('''SELECT duration FROM breakdownData
+                              WHERE machine=? AND date_=? AND shift=? AND stopTime is Null ORDER BY breakId DESC LIMIT 1''',
+                                (mc_name, prevD, prevS))
+            b_time = self.cursor.fetchone()
+            if b_time is not None:
+                return b_time[0]
+            else:
+                return 0
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not get daily breakdown for {mc_name}')
+            return 0
+
+    def addBreakTime(self, today, shift, breakdown_sec):
+        try:
+            time_ = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute("SELECT * FROM breakdownData WHERE date_=? ORDER BY date_ DESC LIMIT 1",
+                                (today,))
+            data = self.cursor.fetchall()
+            if len(data) == 0:
+                self.cursor.execute("INSERT INTO breakdownData(date_, time_, breakdown_time, breakdown_num)"
+                                    "VALUES (?,?,?,?,?)", (today, shift, time_, breakdown_sec, 1))
+            else:
+                self.cursor.execute("UPDATE breakdownData SET breakdown_time=? WHERE date_=? AND shift=?",
+                                    (breakdown_sec, today, shift))
+
+            self.connection.commit()
+            print('Successful', 'Breakdown is added successfully to the database.')
+        except Exception:
+            print('Error', 'Could not add Breakdown to the database.')
+
+    def addBreakCount(self, today):
+        try:
+            time_ = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute("SELECT breakdown_num FROM breakdownData WHERE date_=? order by date_ DESC LIMIT 1",
+                                (today,))
+            bd_count = 0
+            data = self.cursor.fetchall()
+            if len(data) == 0:
+                self.cursor.execute("INSERT INTO breakdownData(date_, time_, breakdown_time, breakdown_num)"
+                                    "VALUES (?,?,?,?)", (today, time_, 0, 1))
+            else:
+                for row in data:
+                    bd_count = row[0]
+                self.cursor.execute("UPDATE breakdownData SET breakdown_num=? WHERE date_=?", (bd_count + 1, today))
+
+            self.connection.commit()
+            print('Successful', 'Breakdown is added successfully to the database.')
+        except Exception:
+            print('Error', 'Could not add Breakdown to the database.')
+
+    def getBreakTime(self, today):
+        self.cursor.execute("SELECT *  from breakdownData where date_=? ORDER BY date_ DESC LIMIT 1", (today,))
+        try:
+            data = self.cursor.fetchone()[0]
+        except:
+            data = 0
+        return data
+        # rows = self.cursor.fetchall()
+        # self.connection.commit()
+        # return rows
+
+    def getBreakStartTime(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT startTime FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchone()
+            if result:
+                start_time = result[0]
+                logger.info(f'Successful: Retrieved start time {start_time} for machine {mc_name}')
+                return start_time
+            else:
+                logger.warning(f'No breakdown start time found for machine {mc_name}')
+                return None
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrieve start time from the database for {mc_name}')
+            return None
+
+    def getBreakStopTime(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT stopTime FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchone()
+            if result:
+                stop_time = result[0]
+                logger.info(f'Successful: Retrieved stop time {stop_time} for machine {mc_name}')
+                return stop_time
+            else:
+                logger.warning(f'No breakdown stop time found for machine {mc_name}')
+                return None
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrieve stop time from the database for {mc_name}')
+            return None
+            return 0
+
+    def getBreakId(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT breakId FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchall()
+            break_ids = result[0]
+            logger.info(f'Successful: Retrieved  break IDs for machine {mc_name}')
+            return break_ids
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrieve break IDs from the database for {mc_name}')
+            return None
+
+    def getDurations(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT duration FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchall()
+            durations = [result[0]]
+            logger.info(f'Successful: Retrieved durations for machine {mc_name}')
+            return durations[0][0]
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrievedurations from the database for {mc_name}')

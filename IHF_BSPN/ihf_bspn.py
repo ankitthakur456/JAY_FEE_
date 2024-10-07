@@ -5,7 +5,7 @@ import requests
 from database import DBHelper
 import time
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from typing import List
 import json
 import os
@@ -13,7 +13,7 @@ import logging.config
 import logging.handlers
 from datetime import datetime, timedelta
 import struct
-from conversions import get_shift
+from conversions import get_shift, break_check
 from dotenv import load_dotenv
 import socket
 
@@ -33,14 +33,14 @@ logger = logging.getLogger('JayFee_log')
 GL_MACHINE_INFO = {
     'BS-1': {
         'py_ok': True,
-        'ip': '192.168.0.103',
+        'ip': '192.168.0.105',
         'stage': 'IHF_BSPN',
         'line': 'Line 1',
     },
-    '': {
+    'BS': {
         'py_ok': True,
-        'ip': '192.168.0.107',
-        'stage': 'IHF_NSPN',
+        'ip': "192.168.0.105",
+        'stage': 'IHF_BSPN',
         'line': 'Line 1',
     }
 }
@@ -51,8 +51,8 @@ PORT = os.getenv('PORT')
 USERNAME_ = os.getenv("USERNAME_")
 
 # ADD_QUEUE_NAMES = os.getenv('ADD_QUEUE_NAMES')
-ADD_QUEUE_NAME = 'add_srl_100_1'
-ADD_QUEUE_NAME1 = 'priority_add_srl_100_1'
+ADD_SERIAL_NUMBER = 'add_srl_100_1'
+ADD_SERIAL_NUMBER1 = 'priority_add_srl_100_1'
 PREV_SHIFT = None
 PREV_VALUE = False
 DEL_SERIAL_NUMBER = os.getenv('DEL_SERIAL_NUMBER')
@@ -60,7 +60,9 @@ SEND_ACK_ADDING = os.getenv('SEND_ACK_ADDING')
 SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
 SEND_DATA_QUEUE = os.getenv('SEND_DATA_QUEUE')
 SEND_DATA = True
+previous_stop_time = None
 API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_ihf_data/"
+BREAK_API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_update_breakdown/"
 HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
@@ -71,12 +73,16 @@ gl_OXYGEN_HEATING_LIST = []
 gl_PNG_PRESSURE_LIST = []
 gl_AIR_PRESSURE_LIST = []
 gl_DAACETYLENE_PRESSURE_LIST = []
+# Initialize a global list to store all payloads
+ALL_PAYLOADS = []
 PREV_BREAK_STATUS = False
+BREAK_STOP_ADDED = False
 BREAK_STATUS = False
 PREV_VALUE = False
 TIME_STATUS = False
 BREAK_CHECK = False
 PREV_BREAK_CHECK = False
+SHIFT_STATUS = False
 transition_time = time.time()
 ob_db = DBHelper()
 
@@ -145,7 +151,7 @@ def Reading_data():
 
 def reading_status():
     try:
-        c = ModbusClient(host='192.168.0.156', port=510, unit_id=1, auto_open=True)
+        c = ModbusClient(host='192.168.0.147', port=510, unit_id=1, auto_open=True)
         regs = c.read_holding_registers(0, 5)
         return regs
     except Exception as err:
@@ -214,8 +220,8 @@ def on_open(connection):
 
 def on_channel_open(channel):
     logger.info("Channel opened.")
-    channel.basic_consume(ADD_QUEUE_NAME, queue1_callback, auto_ack=True)
-    channel.basic_consume(ADD_QUEUE_NAME1, queue2_callback, auto_ack=True)
+    channel.basic_consume(ADD_SERIAL_NUMBER, queue1_callback, auto_ack=True)
+    channel.basic_consume(ADD_SERIAL_NUMBER1, queue2_callback, auto_ack=True)
 
 
 def on_close(connection, reason):
@@ -239,7 +245,7 @@ async def receive():
     try:
         while True:
             await receive_message()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
     except KeyboardInterrupt:
         logger.error('Interrupted')
     except Exception as e:
@@ -302,22 +308,80 @@ def post_sync_data():
         logger.info(f"Synced data is empty")
 
 
+def post_breakdown_data(payload):
+    if SEND_DATA:
+        try:
+            send_req = requests.post(BREAK_API, json=payload, headers=HEADERS, timeout=2)
+            logging.info(payload)
+            logging.info(send_req.status_code)
+            send_req.raise_for_status()
+        except Exception as e:
+            logging.info(f"[-] Error in sending  breakdown data to server, {e}")
+
+
+def breakdowndata(date, prevS, shift):
+    global previous_stop_time, ALL_PAYLOADS  # Ensure this refers to the flag and list outside the function
+
+    break_id = ob_db.getBreakId(GL_MACHINE_NAME)
+    duration = ob_db.getDurations(GL_MACHINE_NAME)
+    start_time = ob_db.getBreakStartTime(GL_MACHINE_NAME)
+    stop_time = ob_db.getBreakStopTime(GL_MACHINE_NAME)
+
+    # Only proceed if stop_time is not None
+    if stop_time is not None:
+        # Check if the stop_time was previously None and is now not None
+        if previous_stop_time is None:
+            new_payload = {
+                "bd_id": break_id[0],
+                "date_": str(date),
+                "shift": str(shift),
+                "machine": GL_MACHINE_NAME,
+                "stage": 'IHF_BSPN-1',
+                "line": str(LINE),
+                "start_time": str(start_time),
+                "stop_time": str(stop_time),
+                "duration": duration,
+                "type": "string",
+                "reason": "string",
+                "category": "string"
+            }
+
+            # Append the new payload to the list of all payloads
+            ALL_PAYLOADS.append(new_payload)
+
+            # Send cumulative payloads
+            for i in range(1, len(ALL_PAYLOADS) + 1):
+                cumulative_payload = ALL_PAYLOADS[:i]
+                post_breakdown_data(cumulative_payload)
+
+        # Update the flag to the current stop_time
+        previous_stop_time = stop_time
+    else:
+        # Reset the flag if stop_time is None
+        previous_stop_time = None
+
+
 def main():
     global FL_STATUS, PREV_FL_STATUS, gl_IHF_HEATING_LIST, gl_IHF_ENTERING_LIST, gl_OXYGEN_HEATING_LIST, \
-        gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num, PREV_VALUE, PREV_BREAK_STATUS, BREAK_STATUS, transition_time, BREAK_CHECK, PREV_BREAK_CHECK, PREV_SHIFT
+        gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DAACETYLENE_PRESSURE_LIST, Ser_Num, PREV_VALUE, \
+        PREV_BREAK_STATUS, BREAK_STATUS, transition_time, BREAK_CHECK, PREV_BREAK_CHECK, PREV_SHIFT, SHIFT_STATUS, \
+        BREAK_STOP_ADDED
     while True:
         ob_db = DBHelper()
         try:
+            SHIFT_STATUS = False
             data = Reading_data()
             status = reading_status()
             post_sync_data()
             shift = get_shift()
+            planned_break_status = break_check(shift)
+            logger.info(f'Breack check is {planned_break_status}')
             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
             ob_db.addBreakDuration(machine_name)
             logger.info(f'status from plc is {status}')
-            ihf_entering = float_conversion([data[2], data[3]])
+            ihf_entering = float_conversion([data[0], data[1]])
             logger.info(f'ihf_entering_ is {ihf_entering}')
-            ihf_heating = float_conversion([data[0], data[1]])
+            ihf_heating = float_conversion([data[2], data[3]])
             logger.info(f'ihf_heating_ is {ihf_heating}')
             oxygen_heating = float_conversion([data[4], data[5]])
             logger.info(f'oxygen_heating_ is {oxygen_heating}')
@@ -328,11 +392,14 @@ def main():
             DA_pressure = 1.5  # float_conversion([data[11], data[12]])
             logger.info(f'DA_pressure_ is {DA_pressure}')
             if ihf_entering > 650:
-                gl_IHF_ENTERING_LIST.append(ihf_entering)
-            if oxygen_heating < 7:
-                gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
+                gl_IHF_ENTERING_LIST.append(round(ihf_entering, 2))
+            # gl_IHF_ENTERING_LIST = [900, 950, 980, 960, 1000, 980]
+            if 0 < oxygen_heating < 7:
+                gl_OXYGEN_HEATING_LIST.append(round(oxygen_heating, 2))
             if ihf_heating > 700:
                 FL_STATUS = True
+                BREAK_CHECK = False
+                PREV_BREAK_CHECK = False
                 logger.info(f'cycle running')
                 logger.info(f'[++++++start time++++++++]{datetime.now().time()}')
             elif ihf_heating < 700:
@@ -341,24 +408,44 @@ def main():
                 logger.info(f'cycle stopped')
             if FL_STATUS:
                 if ihf_heating < 1000:
-                    gl_IHF_HEATING_LIST.append(ihf_heating)
+                    gl_IHF_HEATING_LIST.append(round(ihf_heating, 2))
                 # if ihf_entering < 900:
-                gl_PNG_PRESSURE_LIST.append(png_pressure)
-                gl_AIR_PRESSURE_LIST.append(air_pressure)
+                gl_PNG_PRESSURE_LIST.append(round(png_pressure, 2))
+                gl_AIR_PRESSURE_LIST.append(round(air_pressure, 2))
                 gl_DAACETYLENE_PRESSURE_LIST.append(round(abs(DA_pressure), 2))
             current_value = FL_STATUS
             # Check for transition from 0 to 1
             if PREV_VALUE == True and current_value == False:
                 transition_time = time.time()  # Calculate elapsed time
             PREV_VALUE = current_value
+            logger.info(f'(time.time() - transition_time) > 270 {(time.time() - transition_time)}')
+            logger.info(f'[%] previous break check is {PREV_BREAK_CHECK}')
+            logger.info(f'[%] Break Check is {BREAK_CHECK}')
+            if shift != PREV_SHIFT:
+                breakdowndata(date, PREV_SHIFT, shift)
+                SHIFT_STATUS = True
+                PREV_SHIFT = shift
+            logging.info(f'shift is {shift} and prev_shift is {PREV_SHIFT}')
             if PREV_BREAK_CHECK != BREAK_CHECK and not FL_STATUS and (time.time() - transition_time) > 270:
-                ob_db.addBreakStart(machine_name, date, shift, True)
-                logging.info('[+] Breakstart data added to addBreakStart')
-                BREAK_STATUS = True
-                PREV_BREAK_CHECK = BREAK_CHECK
-            if FL_STATUS and BREAK_STATUS != PREV_BREAK_STATUS:
+                logging.info(f'planned break status is {planned_break_status}')
+                if not planned_break_status or SHIFT_STATUS:
+                    ob_db.addBreakStop(machine_name)
+                    breakdowndata(date, PREV_SHIFT, shift)
+                    ob_db.addBreakStart(machine_name, date, shift, True)
+                    BREAK_STOP_ADDED = False
+                    logging.info('[+] Breakstart data added to addBreakStart')
+                    BREAK_STATUS = True
+                    PREV_BREAK_CHECK = BREAK_CHECK
+            if not BREAK_STOP_ADDED:
+                if planned_break_status or FL_STATUS:
+                    BREAK_CHECK = False
+                    PREV_BREAK_CHECK = False
+                    ob_db.addBreakStop(machine_name)
+                    breakdowndata(date, PREV_SHIFT, shift)
+                    BREAK_STOP_ADDED = True
+            if FL_STATUS and BREAK_STATUS:
                 ob_db.addBreakStop(machine_name)
-                PREV_BREAK_STATUS = BREAK_STATUS
+                BREAK_STATUS = False
             if FL_STATUS != PREV_FL_STATUS:
                 try:
                     if FL_STATUS:
@@ -370,14 +457,10 @@ def main():
                         # asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
                         logger.info(f'serial number is {serial_number}')
 
-                        if shift != PREV_SHIFT:
-                            print('post')
-                            PREV_SHIFT = shift
                         if priority_serial_number or serial_number:
-                            # logger.info(f'ihf heating list {gl_IHF_ENTERING_LIST}')
-                            # logger.info(f'spg heating list {gl_IHF_HEATING_LIST}')
-                            #logger.info(
-                                #f'gl_OXYGEN_HEATING_LIST {gl_OXYGEN_HEATING_LIST} and spg heating at that time is {gl_IHF_ENTERING_LIST}')
+                            logger.info(f'ihf heating list {gl_IHF_ENTERING_LIST}')
+                            logger.info(f'spg heating list {gl_IHF_HEATING_LIST}')
+                            logger.info(f'gl_OXYGEN_HEATING_LIST {gl_OXYGEN_HEATING_LIST} ')
                             logger.info(f' gl_PNG_PRESSURE_LIST list {gl_PNG_PRESSURE_LIST}')
                             ihf_entering = round(max(gl_IHF_ENTERING_LIST), 2)
                             spg_temp = round(max(gl_IHF_HEATING_LIST), 2)
@@ -411,7 +494,6 @@ def main():
                                 "air_pressure": air_pressure,
                                 "png_pressure": png_pressure
                             }
-
                             ob_db.save_running_data(Ser_Num, ihf_entering, spg_temp, o2_gas_pressure,
                                                     png_pressure,
                                                     air_pressure, da_pressure, spindle_speed, spindle_feed)
@@ -428,33 +510,37 @@ def main():
                 except Exception as e:
                     logger.info(f'error is in {e}')
             PREV_FL_STATUS = FL_STATUS
-            time.sleep(0.5)
+            time.sleep(0.1)
         except Exception as err:
             logger.error(f'error in executing main {err}')
 
 
-def check_threads(futures, executor):
-    for future in futures:
-        if future.done() or future.exception():
-            logger.info("Thread completed or raised an exception")
-            futures.remove(future)
-            futures.append(executor.submit(thread_target))
-            futures.append(executor.submit(main))
+def check_threads(threads):
+    for thread in threads:
+        if not thread.is_alive():
+            logger.info("Thread completed or raised an exception, restarting...")
+            threads.remove(thread)
+            new_thread = threading.Thread(target=thread._target)
+            threads.append(new_thread)
+            new_thread.start()
 
 
+# Main function to start threads
 def main_executor():
-    with ThreadPoolExecutor() as executor:
-        futures = []
-        futures.append(executor.submit(thread_target))
-        futures.append(executor.submit(main))
-        logger.info(f'tast to submit is {futures}')
-        while True:
-            check_threads(futures, executor)
-            time.sleep(1.5)
+    threads = []
+    t1 = threading.Thread(target=thread_target)
+    t2 = threading.Thread(target=main)
+    threads.append(t1)
+    threads.append(t2)
+
+    # Start initial threads
+    t1.start()
+    t2.start()
+
+    while True:
+        check_threads(threads)
+        time.sleep(0.1)
 
 
-if __name__ == '__main__':
-    try:
-        main_executor()
-    except KeyboardInterrupt:
-        logger.error('Interrupted')
+if __name__ == "__main__":
+    main_executor()

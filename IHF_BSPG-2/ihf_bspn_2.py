@@ -16,6 +16,7 @@ from conversions import get_shift
 from dotenv import load_dotenv
 from statistics import mean
 import socket
+
 # Load the .env file
 load_dotenv()
 
@@ -170,6 +171,7 @@ def is_connected():
 
 async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
     connection = None
+    retry_delay = 5  # Initial retry delay in seconds
     while True:
         if is_connected():
             try:
@@ -180,16 +182,20 @@ async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PAS
                 connection = pika.SelectConnection(parameters=parameters, on_open_callback=on_open,
                                                    on_close_callback=on_close)
                 connection.ioloop.start()
-
             except pika.exceptions.AMQPConnectionError as e:
                 logger.error(f'AMQP Connection Error: {e}')
-                await asyncio.sleep(5)  # Wait before retrying
+                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff with a maximum delay of 60 seconds
+                await asyncio.sleep(retry_delay)  # Wait before retrying
             except Exception as e:
                 logger.error(f'General Exception in receive_message: {e}')
-                await asyncio.sleep(5)  # Wait before retrying
+                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff with a maximum delay of 60 seconds
+                await asyncio.sleep(retry_delay)  # Wait before retrying
             finally:
                 if connection and connection.is_open:
-                    connection.close()
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        logger.error(f'Error closing connection: {e}')
         else:
             logger.error("Internet connection is down. Waiting for reconnection...")
             while not is_connected():
@@ -201,30 +207,45 @@ async def receive_message(host=HOST, port=PORT, username=USERNAME_, password=PAS
 
 def on_open(connection):
     logger.info("Connection opened.")
-    connection.channel(on_open_callback=on_channel_open)
+    try:
+        connection.channel(on_open_callback=on_channel_open)
+    except Exception as e:
+        logger.error(f'Error opening channel: {e}')
 
 
 def on_channel_open(channel):
     logger.info("Channel opened.")
-    channel.basic_consume(ADD_QUEUE_NAME, queue1_callback, auto_ack=True)
-    channel.basic_consume(ADD_QUEUE_NAME1, queue2_callback, auto_ack=True)
+    try:
+        channel.basic_consume(ADD_QUEUE_NAME, queue1_callback, auto_ack=True)
+        channel.basic_consume(ADD_QUEUE_NAME1, queue2_callback, auto_ack=True)
+    except Exception as e:
+        logger.error(f'Error setting up consumers: {e}')
 
 
 def on_close(connection, reason):
     logger.info(f"Connection closed: {reason}")
-    connection.ioloop.stop()
+    try:
+        connection.ioloop.stop()
+    except Exception as e:
+        logger.error(f'Error stopping IO loop: {e}')
 
 
 def queue1_callback(ch, method, properties, body):
     logger.info(f" [x] Received queue 1: {body}")
     if body:
-        ob_db.enqueue_serial_number(body.decode('utf-8'))
+        try:
+            ob_db.enqueue_serial_number(body.decode('utf-8'))
+        except Exception as e:
+            logger.error(f'Error processing queue 1 message: {e}')
 
 
 def queue2_callback(ch, method, properties, body):
     logger.info(f" [x] Received queue 2: {body}")
     if body:
-        ob_db.enqueue_priority_serial(body.decode('utf-8'))
+        try:
+            ob_db.enqueue_priority_serial(body.decode('utf-8'))
+        except Exception as e:
+            logger.error(f'Error processing queue 2 message: {e}')
 
 
 async def receive():
@@ -240,7 +261,6 @@ async def receive():
 
 def thread_target():
     asyncio.run(receive())
-
 
 
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
@@ -354,7 +374,7 @@ def main():
                             spindle_feed = 300
                             da_pressure = round(max(gl_DAACETYLENE_PRESSURE_LIST), 2)
                             o2_gas_pressure = sum(gl_OXYGEN_HEATING_LIST) // len(gl_OXYGEN_HEATING_LIST)
-                            png_pressure = round(min(gl_PNG_PRESSURE_LIST),2)
+                            png_pressure = round(min(gl_PNG_PRESSURE_LIST), 2)
                             time_ = datetime.now().isoformat()
                             date = (datetime.now() - timedelta(hours=7)).strftime("%F")
                             if priority_serial_number:

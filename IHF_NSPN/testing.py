@@ -16,18 +16,18 @@ shift_c_end = datetime.time(7, 0, 0, 0)
 def get_shift():
     global shift_a_start, shift_b_start, shift_c_start, shift_a_end, shift_b_end, shift_c_end
     now = datetime.datetime.now().time()
-    # new_day = datetime.time(23, 59, 59, 999)
-    # new_one = datetime.time(0, 0, 0, 0)
+    new_day = datetime.time(23, 59, 59, 999)
+    new_one = datetime.time(0, 0, 0, 0)
     if shift_b_start <= now < shift_b_end:
         return 'B'
     elif shift_a_start <= now < shift_a_end:
         return 'A'
-    # elif shift_c_start <= now <= new_day or new_one <= now <= shift_c_end:
-    #     return 'C'
-    else:
-        # here returning C because we are not handling 0.001 microsecond in case of c shift that will return
-        # None otherwise
-        return 'B'
+    elif shift_c_start <= now <= new_day or new_one <= now <= shift_c_end:
+        return 'C'
+    # else:
+    #     # here returning C because we are not handling 0.001 microsecond in case of c shift that will return
+    #     # None otherwise
+    #     return 'B'
 
 
 def break_check(current_shift):
@@ -63,3 +63,7 @@ def break_check(current_shift):
         if (current_time - planned_break).total_seconds() < minutes * 60 and current_time > planned_break:
             return True
     return False
+
+
+a=get_shift()
+print(a)

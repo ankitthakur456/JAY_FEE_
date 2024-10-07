@@ -12,7 +12,7 @@ import logging.config
 import logging.handlers
 from datetime import datetime, timedelta
 import struct
-from conversions import get_shift
+from conversions import get_shift, break_check
 from dotenv import load_dotenv
 import socket
 
@@ -32,15 +32,11 @@ logger = logging.getLogger('JayFee_log')
 GL_MACHINE_INFO = {
     'NS-1': {
         'py_ok': True,
-        'ip': '192.168.0.1',
+        'plc_ip': '192.168.0.156',
+        'machine_ip': '192.168.0.103',
+        'gateway_ip': '192.168.0.146',
         'stage': 'IHF_BSPN',
-        'line': 'Line 2',
-    },
-    'SPG-2': {
-        'py_ok': True,
-        'ip': "192.168.0.105",
-        'stage': 'IHF_NSPN',
-        'line': 'Line 2',
+        'line': 'Line 1',
     }
 }
 
@@ -57,27 +53,44 @@ SEND_ACK_DELETE = os.getenv('SEND_ACK_DELETE')
 SEND_DATA_QUEUE = os.getenv('SEND_DATA_QUEUE')
 SEND_DATA = True
 API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_neck_spinning_data/"
+BREAK_API = "https://ithingspro.cloud/Jay_FE/api/v1/jay_fe/create_update_breakdown/"
 HEADERS = {"Content-Type": "application/json"}
 
 PREV_FL_STATUS = False
 FL_STATUS = False
-gl_IHF_HEATING_LIST = []
-gl_SPG_HEATING_LIST = []
-gl_OXYGEN_HEATING_LIST = []
-gl_PNG_PRESSURE_LIST = []
-gl_DA_GAS_PRESSURE_LIST = []
+machine_name = 'NS-1'
+GL_IHF_HEATING_LIST = []
+GL_SPG_HEATING_LIST = []
+GL_OXYGEN_HEATING_LIST = []
+GL_PNG_PRESSURE_LIST = []
+GL_DA_GAS_PRESSURE_LIST = []
 ob_db = DBHelper()
 ihf_temperature = 0
 ihf_entering = 0
 o2_gas_pressure = 0
 png_pressure = 0
+ALL_PAYLOADS = []
+PREV_SHIFT = None
+PREV_VALUE = False
+GL_IHF_ENTERING_LIST = []
+GL_AIR_PRESSURE_LIST = []
+PREV_BREAK_STATUS = False
+BREAK_STOP_ADDED = False
+BREAK_STATUS = False
+PREV_VALUE = False
+TIME_STATUS = False
+BREAK_CHECK = False
+PREV_BREAK_CHECK = False
+SHIFT_STATUS = False
+transition_time = time.time()
+previous_stop_time = None
 
 
 # DATA GATHERING
 
 def init_conf():
-    global GL_MACHINE_NAME, GL_PARAM_LIST, PUBLISH_TOPIC, PY_OK, ENERGY_TOPIC, GL_IP
-    global MACHINE_ID, LINE, STAGE
+    global GL_MACHINE_NAME, GL_PARAM_LIST, PUBLISH_TOPIC, PY_OK, ENERGY_TOPIC, GL_PLC_IP
+    global MACHINE_ID, LINE, STAGE, GL_MACHINE_IP
     if not os.path.isdir("./conf"):
         logger.info("[-] conf directory doesn't exists")
         try:
@@ -98,7 +111,9 @@ def init_conf():
             PY_OK = GL_MACHINE_INFO[GL_MACHINE_NAME]['py_ok']
             STAGE = GL_MACHINE_INFO[GL_MACHINE_NAME]["stage"]
             LINE = GL_MACHINE_INFO[GL_MACHINE_NAME]["line"]
-            GL_IP = GL_MACHINE_INFO[GL_MACHINE_NAME]['ip']
+            GL_PLC_IP = GL_MACHINE_INFO[GL_MACHINE_NAME]['plc_ip']
+            GL_MACHINE_IP = GL_MACHINE_INFO[GL_MACHINE_NAME]['machine_ip']
+
             print(f"[+] Machine_name is {GL_MACHINE_NAME}")
     except FileNotFoundError as e:
         logger.error(f'[-] machine_config.conf not found {e}')
@@ -111,12 +126,13 @@ logger.info(f"[+] Initialising configuration")
 init_conf()
 logger.info(f"[+] Machine is {GL_MACHINE_NAME}")
 logger.info(f"[+] Machine stage is {STAGE}")
-logger.info(f"[+] Machine IP is {GL_IP}")
+logger.info(f"[+] PLC IP is {GL_PLC_IP}")
+logger.info(f"[+] Machine IP is {GL_MACHINE_IP}")
 logger.info(f"[+] Trigger topic is {PY_OK}")
 
 
 def Connection():
-    c = ModbusClient(host='192.168.0.105', port=510, unit_id=1, auto_open=True)
+    c = ModbusClient(host=GL_MACHINE_IP, port=510, unit_id=1, auto_open=True)
     return c
 
 
@@ -137,7 +153,7 @@ def Reading_data():
 
 def reading_status():
     try:
-        c = ModbusClient(host='192.168.0.147', port=510, unit_id=1, auto_open=True)
+        c = ModbusClient(host=GL_PLC_IP, port=510, unit_id=1, auto_open=True)
         regs = c.read_holding_registers(0, 5)
         return regs
     except Exception as err:
@@ -231,7 +247,7 @@ async def receive():
     try:
         while True:
             await receive_message()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
     except KeyboardInterrupt:
         logger.error('Interrupted')
     except Exception as e:
@@ -257,11 +273,11 @@ def post_data(DATA):
     if SEND_DATA:
         try:
             send_req = requests.post(API, json=DATA, headers=HEADERS, timeout=2)
-            print(DATA)
-            print(send_req.status_code)
+            logging.info(DATA)
+            logging.info(send_req.status_code)
             send_req.raise_for_status()
         except Exception as e:
-            print(f"[-] Error in sending data TO API, {e}")
+            logging.info(f"[-] Error in sending data TO API, {e}")
             ob_db.add_sync_data(DATA)
 
 
@@ -294,15 +310,94 @@ def post_sync_data():
         logger.info(f"Synced data is empty")
 
 
+def post_breakdown_data(payload):
+    if SEND_DATA:
+        try:
+            send_req = requests.post(BREAK_API, json=payload, headers=HEADERS, timeout=2)
+            logging.info(payload)
+            logging.info(send_req.status_code)
+            send_req.raise_for_status()
+        except Exception as e:
+            logging.info(f"[-] Error in sending  breakdown data to server, {e}")
+
+
+class LimitedList:
+    def __init__(self, max_size):
+        self.max_size = max_size
+        self.data = []
+
+    def append(self, value):
+        if len(self.data) >= self.max_size:
+            self.data.pop(0)
+        self.data.append(value)
+
+    def __repr__(self):
+        return repr(self.data)
+
+
+
+
+
+def breakdowndata(date, prevS, shift):
+    global previous_stop_time, ALL_PAYLOADS  # Ensure this refers to the flag and list outside the function
+
+    break_id = ob_db.getBreakId(GL_MACHINE_NAME)
+    duration = ob_db.getDurations(GL_MACHINE_NAME)
+    start_time = ob_db.getBreakStartTime(GL_MACHINE_NAME)
+    stop_time = ob_db.getBreakStopTime(GL_MACHINE_NAME)
+
+    # Only proceed if stop_time is not None
+    if stop_time is not None:
+        # Check if the stop_time was previously None and is now not None
+        if previous_stop_time is None:
+            new_payload = {
+                "bd_id": break_id[0],
+                "date_": str(date),
+                "shift": str(shift),
+                "machine": GL_MACHINE_NAME,
+                "stage": 'IHF_BSPN-1',
+                "line": str(LINE),
+                "start_time": str(start_time),
+                "stop_time": str(stop_time),
+                "duration": duration,
+                "type": "string",
+                "reason": "string",
+                "category": "string"
+            }
+
+            # Append the new payload to the list of all payloads
+            #ALL_PAYLOADS.append(new_payload)
+            # Create a limited list with a maximum size of 5
+            ALL_PAYLOADS = LimitedList(5)
+            ALL_PAYLOADS.append(new_payload)
+            # # Send cumulative payloads
+            # for i in range(1, len(ALL_PAYLOADS) + 1):
+            #     cumulative_payload = ALL_PAYLOADS[:i]
+            post_breakdown_data(ALL_PAYLOADS)
+            logger.info(f'all breakdown payload is {ALL_PAYLOADS}')
+        # Update the flag to the current stop_time
+        previous_stop_time = stop_time
+    else:
+        # Reset the flag if stop_time is None
+        previous_stop_time = None
+
+
 def main():
-    global FL_STATUS, PREV_FL_STATUS, gl_SPG_HEATING_LIST, gl_IHF_HEATING_LIST, gl_OXYGEN_HEATING_LIST, gl_PNG_PRESSURE_LIST, gl_AIR_PRESSURE_LIST, gl_DA_GAS_PRESSURE_LIST
-    global ihf_temperature, ihf_entering, o2_gas_pressure, png_pressure
+    global FL_STATUS, PREV_FL_STATUS, GL_IHF_HEATING_LIST, GL_IHF_ENTERING_LIST, GL_OXYGEN_HEATING_LIST, \
+        GL_PNG_PRESSURE_LIST, GL_AIR_PRESSURE_LIST, GL_DAACETYLENE_PRESSURE_LIST, Ser_Num, PREV_VALUE, \
+        PREV_BREAK_STATUS, BREAK_STATUS, transition_time, BREAK_CHECK, PREV_BREAK_CHECK, PREV_SHIFT, SHIFT_STATUS, \
+        BREAK_STOP_ADDED, GL_DA_GAS_PRESSURE_LIST, GL_SPG_HEATING_LIST
     while True:
         ob_db = DBHelper()
         try:
+            SHIFT_STATUS = False
             post_sync_data()
             data = Reading_data()
+            shift = get_shift()
+            date = (datetime.now() - timedelta(hours=7)).strftime("%F")
+            planned_break_status = break_check(shift)
             status = reading_status()
+            ob_db.addBreakDuration(machine_name)
             logger.info(f'status from machine is {status}')
             ihf_heating = round(float_conversion([data[0], data[1]]), 2)
             logger.info(f'ihf_heating_ is {ihf_heating}')
@@ -316,20 +411,59 @@ def main():
             logger.info(f'da_gas_pressure is {da_gas_pressure}')
 
             if ihf_heating > 750:
-                gl_IHF_HEATING_LIST.append(ihf_heating)
+                GL_IHF_HEATING_LIST.append(ihf_heating)
             if spg_heating > 750:
                 FL_STATUS = True
+                BREAK_CHECK = False
+                PREV_BREAK_CHECK = False
                 logger.info(f'cycle running')
             elif spg_heating < 750:
                 FL_STATUS = False
+                BREAK_CHECK = True
                 logger.info(f'cycle stopped')
             if FL_STATUS:
                 if spg_heating < 1000:
-                    gl_SPG_HEATING_LIST.append(spg_heating)
-                gl_OXYGEN_HEATING_LIST.append(oxygen_heating)
-                gl_PNG_PRESSURE_LIST.append(png_pressure)
-                gl_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
+                    GL_SPG_HEATING_LIST.append(spg_heating)
+                if 7 > oxygen_heating:
+                    GL_OXYGEN_HEATING_LIST.append(oxygen_heating)
+                else:
+                    GL_OXYGEN_HEATING_LIST.append(0)
+                GL_PNG_PRESSURE_LIST.append(png_pressure)
+                GL_DA_GAS_PRESSURE_LIST.append(da_gas_pressure)
+            current_value = FL_STATUS
+            # Check for transition from 0 to 1
+            if PREV_VALUE == True and current_value == False:
+                transition_time = time.time()  # Calculate elapsed time
+            PREV_VALUE = current_value
+            logger.info(f'(time.time() - transition_time) > 270 {(time.time() - transition_time)}')
+            logger.info(f'[%] previous break check is {PREV_BREAK_CHECK}')
+            logger.info(f'[%] Break Check is {BREAK_CHECK}')
+            if shift != PREV_SHIFT:
+                breakdowndata(date, PREV_SHIFT, shift)
+                SHIFT_STATUS = True
+                PREV_SHIFT = shift
+            logging.info(f'shift is {shift} and prev_shift is {PREV_SHIFT}')
+            if PREV_BREAK_CHECK != BREAK_CHECK and not FL_STATUS and (time.time() - transition_time) > 270:
+                logging.info(f'planned break status is {planned_break_status}')
 
+                if not planned_break_status or SHIFT_STATUS:
+                    ob_db.addBreakStop(machine_name)
+                    breakdowndata(date, PREV_SHIFT, shift)
+                    ob_db.addBreakStart(machine_name, date, shift, True)
+                    BREAK_STOP_ADDED = False
+                    logging.info('[+] Breakstart data added to addBreakStart')
+                    BREAK_STATUS = True
+                    PREV_BREAK_CHECK = BREAK_CHECK
+            if not BREAK_STOP_ADDED:
+                if planned_break_status or FL_STATUS:
+                    BREAK_CHECK = False
+                    PREV_BREAK_CHECK = False
+                    ob_db.addBreakStop(machine_name)
+                    breakdowndata(date, PREV_SHIFT, shift)
+                    BREAK_STOP_ADDED = True
+            if FL_STATUS and BREAK_STATUS:
+                ob_db.addBreakStop(machine_name)
+                BREAK_STATUS = False
             if FL_STATUS != PREV_FL_STATUS:
                 try:
                     if FL_STATUS:
@@ -346,20 +480,21 @@ def main():
                         if serial_n:
                             shift = get_shift()
                             asyncio.run(send_message(serial_number, SEND_ACK_ADDING))
-                            logger.info(f'gl_IHF_HEATING_LIST list is {gl_IHF_HEATING_LIST}')
-                            logger.info(f'gl_SPG_HEATING_LIST list is {gl_SPG_HEATING_LIST}')
-                            logger.info(f'gl_OXYGEN_HEATING_LIST list is {gl_OXYGEN_HEATING_LIST}')
-                            logger.info(f'gl_PNG_PRESSURE_LIST     list is {gl_PNG_PRESSURE_LIST}')
-                            logger.info(f'gl_DA_GAS_PRESSURE_LIST list is {gl_DA_GAS_PRESSURE_LIST}')
-                            ihf_temperature = max(gl_IHF_HEATING_LIST)
-                            ihf_entering = max(gl_SPG_HEATING_LIST)
-                            if not gl_SPG_HEATING_LIST:
+                            logger.info(f'GL_IHF_HEATING_LIST list is {GL_IHF_HEATING_LIST}')
+                            logger.info(f'GL_SPG_HEATING_LIST list is {GL_SPG_HEATING_LIST}')
+                            logger.info(f'GL_OXYGEN_HEATING_LIST list is {GL_OXYGEN_HEATING_LIST}')
+                            logger.info(f'GL_PNG_PRESSURE_LIST     list is {GL_PNG_PRESSURE_LIST}')
+                            logger.info(f'GL_DA_GAS_PRESSURE_LIST list is {GL_DA_GAS_PRESSURE_LIST}')
+                            ihf_temperature = max(GL_IHF_HEATING_LIST)
+                            ihf_entering = max(GL_SPG_HEATING_LIST)
+                            if not GL_SPG_HEATING_LIST:
                                 ihf_entering = 0
                             spindle_speed = 150
                             spindle_feed = 300
-                            o2_gas_pressure = sum(gl_OXYGEN_HEATING_LIST) // len(gl_OXYGEN_HEATING_LIST)
-                            png_pressure = min(gl_PNG_PRESSURE_LIST)
-                            da_gas_pressure = max(gl_DA_GAS_PRESSURE_LIST)
+                            o2_gas_pressure = max(
+                                GL_OXYGEN_HEATING_LIST)  # sum(GL_OXYGEN_HEATING_LIST) // len(GL_OXYGEN_HEATING_LIST)
+                            png_pressure = min(GL_PNG_PRESSURE_LIST)
+                            da_gas_pressure = max(GL_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()
                                 date = (datetime.now() - timedelta(hours=7)).strftime("%F")
@@ -376,21 +511,25 @@ def main():
                                     "ihf_entering": round(ihf_entering, 2),
                                     "spindle_speed": round(spindle_speed, 2),
                                     "spindle_feed": round(spindle_feed, 2),
-                                    "o2_gas_pressure": round(o2_gas_pressure, 2),
+                                    "o2_gas_pressure": int(o2_gas_pressure),
                                     "png_pressure": round(png_pressure, 2)
                                 }
+                                air_pressure = 1
+                                daacetylene_pressure = 1
+
                                 logger.info(f'da_gas_pressure is {da_gas_pressure}')
+
                                 ob_db.save_running_data(serial_number, ihf_temperature, ihf_entering, o2_gas_pressure,
                                                         png_pressure)
                                 logger.info(f'payload is {DATA}')
                                 post_data(DATA)
                                 ob_db.delete_serial_number(serial_n)
                                 ob_db.delete_priority_serial(serial_n)
-                                gl_IHF_HEATING_LIST = []
-                                gl_SPG_HEATING_LIST = []
-                                gl_OXYGEN_HEATING_LIST = []
-                                gl_PNG_PRESSURE_LIST = []
-                                gl_DA_GAS_PRESSURE_LIST = []
+                                GL_IHF_HEATING_LIST = []
+                                GL_SPG_HEATING_LIST = []
+                                GL_OXYGEN_HEATING_LIST = []
+                                GL_PNG_PRESSURE_LIST = []
+                                GL_DA_GAS_PRESSURE_LIST = []
                                 ihf_temperature = 0
                                 ihf_entering = 0
                                 o2_gas_pressure = 0

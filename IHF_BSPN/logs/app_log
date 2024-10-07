@@ -1,3 +1,0 @@
-2024-05-14 16:06:09,034 - JayFee_log - INFO - reading data from  plc None
-2024-05-14 16:07:46,485 - JayFee_log - INFO - reading data from  plc None
-2024-05-14 16:07:46,486 - JayFee_log - ERROR - error in executing main 'NoneType' object is not subscriptable

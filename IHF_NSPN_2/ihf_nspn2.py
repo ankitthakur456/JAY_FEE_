@@ -243,7 +243,6 @@ def thread_target():
     asyncio.run(receive())
 
 
-
 async def send_message(body, queue_name, host=HOST, port=PORT, username=USERNAME_, password=PASSWORD):
     credentials = pika.PlainCredentials(username, password)
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port, credentials=credentials))
@@ -359,7 +358,7 @@ def main():
                             spindle_speed = 150
                             spindle_feed = 300
                             o2_gas_pressure = mean(gl_OXYGEN_HEATING_LIST)
-                            png_pressure = mean(gl_PNG_PRESSURE_LIST)
+                            png_pressure = min(gl_PNG_PRESSURE_LIST)
                             da_gas_pressure = mean(gl_DA_GAS_PRESSURE_LIST)
                             try:
                                 time_ = datetime.now().isoformat()

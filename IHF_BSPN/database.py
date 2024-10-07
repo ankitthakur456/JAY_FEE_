@@ -146,6 +146,7 @@ class DBHelper:
             logger.error(f"[-] Failed to save running data. Error: {error}")
 
     # endregion
+    # endregion
 
     # region Sync data TB database
     def add_sync_data(self, payload):
@@ -335,26 +336,62 @@ class DBHelper:
         # self.connection.commit()
         # return rows
 
-    def getBreakCount(self, today):
-        self.cursor.execute("SELECT breakdown_num from breakdownData where date_=? ORDER BY date_ DESC LIMIT 1",
-                            (today,))
+    def getBreakStartTime(self, mc_name):
         try:
-            data = self.cursor.fetchone()[0]
-        except:
-            data = 0
-        return data
-        # rows = self.cursor.fetchall()
-        # self.connection.commit()
-
-    def get_breakCount(self, today, shift):
-        try:
-            self.cursor.execute("select count(breakId) from breakdownData where date_=? and shift=?",
-                                (today, shift))
-            break_count = self.cursor.fetchone()
-            if break_count:
-                return break_count[0]
+            self.cursor.execute(
+                "SELECT startTime FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchone()
+            if result:
+                start_time = result[0]
+                logger.info(f'Successful: Retrieved start time {start_time} for machine {mc_name}')
+                return start_time
             else:
-                return 0
+                logger.warning(f'No breakdown start time found for machine {mc_name}')
+                return None
         except Exception as e:
-            logger.error(f"[-] Unable to fetch break_count Error: {e}")
+            logger.error(f'Error: {e}, Could not retrieve start time from the database for {mc_name}')
+            return None
+
+    def getBreakStopTime(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT stopTime FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchone()
+            if result:
+                stop_time = result[0]
+                logger.info(f'Successful: Retrieved stop time {stop_time} for machine {mc_name}')
+                return stop_time
+            else:
+                logger.warning(f'No breakdown stop time found for machine {mc_name}')
+                return None
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrieve stop time from the database for {mc_name}')
+            return None
             return 0
+
+    def getBreakId(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT breakId FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchall()
+            break_ids = result[0]
+            logger.info(f'Successful: Retrieved  break IDs for machine {mc_name}')
+            return break_ids
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrieve break IDs from the database for {mc_name}')
+            return None
+
+    def getDurations(self, mc_name):
+        try:
+            self.cursor.execute(
+                "SELECT duration FROM breakdownData WHERE machine = ? ORDER BY date_ DESC, time_ DESC LIMIT 1",
+                (mc_name,))
+            result = self.cursor.fetchall()
+            durations = [result[0]]
+            logger.info(f'Successful: Retrieved durations for machine {mc_name}')
+            return durations[0][0]
+        except Exception as e:
+            logger.error(f'Error: {e}, Could not retrievedurations from the database for {mc_name}')
